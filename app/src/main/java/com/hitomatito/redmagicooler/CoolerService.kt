@@ -132,6 +132,8 @@ class CoolerService : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .setShowWhen(false)
+            .setOnlyAlertOnce(true) // Solo alertar una vez, updates silenciosos
+            .setSilent(true) // Silenciosa para ahorrar recursos
             .setContentIntent(openPendingIntent)
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
@@ -313,6 +315,15 @@ class CoolerService : Service() {
                 Log.e(TAG, "SecurityException escribiendo: ${e.message}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error escribiendo: ${e.message}")
+                if (e is android.os.DeadObjectException) {
+                    // Bluetooth se reinició, forzar reconexión
+                    Log.w(TAG, "DeadObjectException: Bluetooth desconectado inesperadamente, reconectando...")
+                    isConnected = false
+                    bluetoothGatt?.close()
+                    bluetoothGatt = null
+                    fanCharacteristic = null
+                    connectToCooler()
+                }
             }
         }
     }

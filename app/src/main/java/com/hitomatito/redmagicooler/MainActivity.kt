@@ -7,6 +7,8 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -71,6 +73,20 @@ class MainActivity : ComponentActivity() {
     private var thermalData by mutableStateOf(ThermalMonitor.ThermalData())
     private var lastAutoAdjustTime = 0L
 
+    /**
+     * Verifica si un servicio está ejecutándose
+     */
+    private fun isServiceRunning(serviceClass: Class<*>): Boolean {
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        @Suppress("DEPRECATION")
+        for (service in manager.getRunningServices(Integer.MAX_VALUE)) {
+            if (serviceClass.name == service.service.className) {
+                return true
+            }
+        }
+        return false
+    }
+
     companion object {
         private const val TAG = "RedMagicCooler"
         private const val COOLER_MAC_ADDRESS = "24:04:09:00:BB:8D"
@@ -131,7 +147,7 @@ class MainActivity : ComponentActivity() {
         // Inicializar monitor térmico
         thermalMonitor = ThermalMonitor(this)
         thermalMonitor.startAmbientSensor()
-        startThermalMonitoring()
+        startThermalMonitoring() // Iniciar monitoreo térmico para actualizar UI
 
         setContent {
             RedmagiCoolerTheme {
@@ -179,6 +195,13 @@ class MainActivity : ComponentActivity() {
     private fun connectToCooler() {
         if (isConnecting || isConnected) {
             Log.w(TAG, "Ya conectado o conectando")
+            return
+        }
+
+        // Si el servicio automático está corriendo, no conectar desde la UI
+        if (isServiceRunning(CoolerService::class.java)) {
+            Log.w(TAG, "Servicio automático corriendo, no conectar desde UI")
+            Toast.makeText(this, "Modo automático activo, usa el servicio en background", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -273,6 +296,11 @@ class MainActivity : ComponentActivity() {
                         statusMessage = "Desconectado"
                         Log.d(TAG, "Desconectado del cooler, status: $status")
                         fanCharacteristic = null
+                        
+                        // Detener monitoreo térmico si no hay servicio automático corriendo
+                        if (!isServiceRunning(CoolerService::class.java)) {
+                            thermalMonitor.stopMonitoring()
+                        }
                     }
                 }
             }
@@ -333,11 +361,11 @@ class MainActivity : ComponentActivity() {
                     } else 0
                     Log.d(TAG, "Velocidad escrita exitosamente: $value")
                     statusMessage = "Velocidad aplicada: $value"
-                    Toast.makeText(this@MainActivity, "Velocidad aplicada: $value", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this@MainActivity, "Velocidad aplicada: $value", Toast.LENGTH_SHORT).show() // Removido: no mostrar en modo automático
                 } else {
                     Log.e(TAG, "Error escribiendo characteristic: $status")
                     statusMessage = "Error aplicando velocidad"
-                    Toast.makeText(this@MainActivity, "Error aplicando velocidad", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this@MainActivity, "Error aplicando velocidad", Toast.LENGTH_SHORT).show() // Removido: menos intrusivo
                 }
             }
         }
@@ -377,14 +405,14 @@ class MainActivity : ComponentActivity() {
 
     private fun setFanSpeed(speed: Int) {
         if (!isConnected) {
-            Toast.makeText(this, "No conectado al cooler", Toast.LENGTH_SHORT).show()
+            // Toast.makeText(this, "No conectado al cooler", Toast.LENGTH_SHORT).show() // Removido
             return
         }
 
         fanCharacteristic?.let { characteristic ->
             try {
                 if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                    Toast.makeText(this, "Permiso BLUETOOTH_CONNECT requerido", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this, "Permiso BLUETOOTH_CONNECT requerido", Toast.LENGTH_SHORT).show() // Removido
                     return
                 }
                 
@@ -407,7 +435,18 @@ class MainActivity : ComponentActivity() {
                 } catch (e: SecurityException) {
                     Log.e(TAG, "SecurityException al escribir: ${e.message}")
                     statusMessage = "Error de permisos al escribir"
-                    Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show() // Removido
+                    false
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error al escribir characteristic: ${e.message}", e)
+                    if (e is android.os.DeadObjectException) {
+                        // Bluetooth se reinició, marcar como desconectado
+                        Log.w(TAG, "DeadObjectException: Bluetooth desconectado inesperadamente")
+                        isConnected = false
+                        fanCharacteristic = null
+                        statusMessage = "Desconectado - Bluetooth reiniciado"
+                        thermalMonitor.stopMonitoring() // Detener monitoreo térmico
+                    }
                     false
                 }
                 
@@ -417,33 +456,33 @@ class MainActivity : ComponentActivity() {
                 } else {
                     Log.e(TAG, "Fallo al enviar comando de escritura")
                     statusMessage = "Error al enviar comando"
-                    Toast.makeText(this, "Error al enviar comando", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this, "Error al enviar comando", Toast.LENGTH_SHORT).show() // Removido
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "SecurityException estableciendo velocidad: ${e.message}", e)
                 statusMessage = "Error de permisos"
-                Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show()
+                // Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show() // Removido
             } catch (e: Exception) {
                 Log.e(TAG, "Error estableciendo velocidad: ${e.message}", e)
                 statusMessage = "Error: ${e.message}"
-                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                // Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show() // Removido
             }
         } ?: run {
             Log.w(TAG, "Fan characteristic no disponible")
-            Toast.makeText(this, "Servicio no disponible", Toast.LENGTH_SHORT).show()
+            // Toast.makeText(this, "Servicio no disponible", Toast.LENGTH_SHORT).show() // Removido
         }
     }
 
     private fun readStatus() {
         if (!isConnected) {
-            Toast.makeText(this, "No conectado al cooler", Toast.LENGTH_SHORT).show()
+            // Toast.makeText(this, "No conectado al cooler", Toast.LENGTH_SHORT).show() // Removido
             return
         }
 
         fanCharacteristic?.let { characteristic ->
             try {
                 if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                    Toast.makeText(this, "Permiso BLUETOOTH_CONNECT requerido", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this, "Permiso BLUETOOTH_CONNECT requerido", Toast.LENGTH_SHORT).show() // Removido
                     return
                 }
                 
@@ -454,7 +493,7 @@ class MainActivity : ComponentActivity() {
                 } catch (e: SecurityException) {
                     Log.e(TAG, "SecurityException al leer: ${e.message}")
                     statusMessage = "Error de permisos al leer"
-                    Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show()
+                    // Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show() // Removido
                     false
                 }
                 
@@ -515,8 +554,8 @@ class MainActivity : ComponentActivity() {
             thermalData = data
             currentTemp = data.maxTemp.toInt()
             
-            // Si modo automático está activo y conectado, ajustar velocidad
-            if (isAutoMode && isConnected) {
+            // Si modo automático está activo, conectado, y no hay servicio corriendo, ajustar velocidad
+            if (isAutoMode && isConnected && !isServiceRunning(CoolerService::class.java)) {
                 val currentTime = System.currentTimeMillis()
                 // Ajustar cada 5 segundos para evitar cambios muy frecuentes
                 if (currentTime - lastAutoAdjustTime > 5000) {
@@ -534,13 +573,14 @@ class MainActivity : ComponentActivity() {
         isAutoMode = !isAutoMode
         
         if (isAutoMode) {
-            if (!isConnected) {
-                Toast.makeText(this, "Conecta el cooler primero", Toast.LENGTH_SHORT).show()
+            // Verificar permiso de notificaciones
+            if (!BlePermissionManager.hasNotificationPermission(this)) {
+                Toast.makeText(this, "Se requiere permiso de notificaciones para el modo automático", Toast.LENGTH_SHORT).show()
                 isAutoMode = false
                 return
             }
             
-            // Iniciar servicio en segundo plano
+            // Iniciar servicio en segundo plano para modo automático
             val serviceIntent = Intent(this, CoolerService::class.java).apply {
                 action = CoolerService.ACTION_START_AUTO
             }
@@ -553,20 +593,43 @@ class MainActivity : ComponentActivity() {
             
             statusMessage = "Modo Automático: Servicio en segundo plano activo"
             Log.d(TAG, "Modo automático activado - Servicio iniciado")
-            Toast.makeText(this, "Modo Automático Activado\nPuedes cerrar la app", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Modo Automático Activado\nControl en background con notificaciones", Toast.LENGTH_LONG).show()
             
-            // Nota: Mantener la conexión de MainActivity para controles manuales si es necesario
+            // Desconectar GATT de la activity (el servicio manejará la conexión y notificaciones)
+            if (isConnected) {
+                try {
+                    if (BlePermissionManager.hasBluetoothConnectPermission(this)) {
+                        bluetoothGatt?.disconnect()
+                        bluetoothGatt?.close()
+                    }
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "Error desconectando: ${e.message}")
+                }
+                bluetoothGatt = null
+                isConnected = false
+            }
+            statusMessage = "Modo Automático Activo"
             
         } else {
-            // Detener servicio
-            val serviceIntent = Intent(this, CoolerService::class.java).apply {
-                action = CoolerService.ACTION_STOP_AUTO
+            // Desactivar modo automático
+            if (isServiceRunning(CoolerService::class.java)) {
+                // Detener servicio
+                val stopIntent = Intent(this, CoolerService::class.java).apply {
+                    action = CoolerService.ACTION_STOP_AUTO
+                }
+                stopService(stopIntent)
+                Log.d(TAG, "Servicio automático detenido")
             }
-            stopService(serviceIntent)
             
-            statusMessage = "Modo manual - Control manual activo"
-            Log.d(TAG, "Modo automático desactivado - Servicio detenido")
-            Toast.makeText(this, "Modo Manual Activado", Toast.LENGTH_SHORT).show()
+            statusMessage = "Modo Automático: Desactivado"
+            Log.d(TAG, "Modo automático desactivado")
+            Toast.makeText(this, "Modo Automático Desactivado", Toast.LENGTH_SHORT).show()
+            
+            // Intentar reconectar automáticamente para control manual
+            if (BlePermissionManager.hasAllPermissions(this) && bluetoothAdapter.isEnabled && !isConnected) {
+                Log.d(TAG, "Intentando reconectar para control manual después de desactivar modo automático")
+                connectToCooler()
+            }
         }
     }
 }
@@ -608,8 +671,11 @@ fun CoolerControlScreen(
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = if (isConnected) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceVariant
+                containerColor = when {
+                    isAutoMode -> MaterialTheme.colorScheme.secondaryContainer
+                    isConnected -> MaterialTheme.colorScheme.primaryContainer
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
             )
         ) {
             Column(
@@ -618,6 +684,7 @@ fun CoolerControlScreen(
             ) {
                 Text(
                     text = "Estado: ${when {
+                        isAutoMode -> "🔄 Modo Automático Activo"
                         isConnecting -> "Conectando..."
                         isConnected -> "✓ Conectado"
                         else -> "✗ Desconectado"
@@ -687,7 +754,7 @@ fun CoolerControlScreen(
                     )
                     Button(
                         onClick = onToggleAutoMode,
-                        enabled = isConnected,
+                        enabled = !isConnecting,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isAutoMode) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.secondary
