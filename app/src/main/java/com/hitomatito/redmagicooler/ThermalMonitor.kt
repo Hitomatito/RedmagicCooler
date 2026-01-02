@@ -19,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -95,7 +96,9 @@ class ThermalMonitor(private val context: Context) {
                 try {
                     intervalCounter++
                     val thermalData = getCurrentThermalData(intervalCounter)
-                    onUpdate(thermalData)
+                    withContext(Dispatchers.Main) {
+                        onUpdate(thermalData)
+                    }
                     delay(updateIntervalMs)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error en monitoreo: ${e.message}", e)

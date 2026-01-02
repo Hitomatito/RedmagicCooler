@@ -1,13 +1,16 @@
 package com.hitomatito.redmagicooler
 
-import android.app.*
-import android.bluetooth.BluetoothAdapter
+import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
@@ -17,6 +20,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
@@ -32,8 +37,6 @@ class CoolerService : Service() {
         
         const val ACTION_START_AUTO = "com.hitomatito.redmagicooler.START_AUTO"
         const val ACTION_STOP_AUTO = "com.hitomatito.redmagicooler.STOP_AUTO"
-        const val ACTION_UPDATE_SPEED = "com.hitomatito.redmagicooler.UPDATE_SPEED"
-        const val EXTRA_SPEED = "speed"
     }
     
     private lateinit var thermalMonitor: ThermalMonitor
@@ -44,8 +47,9 @@ class CoolerService : Service() {
     private var lastAutoAdjustTime = 0L
     private var currentTemp = 0f
     private var currentSpeed = 0
+    private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 5
     
-    private val serviceUUID = UUID.fromString("d52082ad-e805-9f97-9d4e-1c682d9c9ce6")
     private val fanCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
     
     override fun onCreate() {
@@ -81,6 +85,7 @@ class CoolerService : Service() {
         serviceScope.cancel()
         
         try {
+            @SuppressLint("MissingPermission")
             if (BlePermissionManager.hasBluetoothConnectPermission(this)) {
                 bluetoothGatt?.disconnect()
                 bluetoothGatt?.close()
@@ -179,9 +184,11 @@ class CoolerService : Service() {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     isConnected = true
+                    reconnectAttempts = 0 // Resetear contador de reintentos
                     Log.d(TAG, "Conectado al cooler")
                     
                     try {
+                        @SuppressLint("MissingPermission")
                         if (BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
                             gatt.discoverServices()
                         }
@@ -191,22 +198,44 @@ class CoolerService : Service() {
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     isConnected = false
-                    Log.d(TAG, "Desconectado del cooler")
+                    Log.d(TAG, "Desconectado del cooler, status: $status")
                     updateNotification("Desconectado", 0, currentTemp)
+                    
+                    // Intentar reconectar automáticamente si no hemos excedido el límite
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++
+                        Log.d(TAG, "Intentando reconectar... (intento $reconnectAttempts/$maxReconnectAttempts)")
+                        serviceScope.launch {
+                            delay(5000L) // Esperar 5 segundos antes de reconectar
+                            connectToCooler()
+                        }
+                    } else {
+                        Log.w(TAG, "Máximo número de reintentos alcanzado, deteniendo servicio")
+                        stopSelf()
+                    }
                 }
             }
         }
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                val service = gatt.getService(serviceUUID)
-                fanCharacteristic = service?.getCharacteristic(fanCharacteristicUUID)
+                // Buscar la característica del fan en todos los servicios disponibles
+                fanCharacteristic = null
+                for (service in gatt.services ?: emptyList()) {
+                    val characteristic = service.getCharacteristic(fanCharacteristicUUID)
+                    if (characteristic != null) {
+                        fanCharacteristic = characteristic
+                        Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
+                        break
+                    }
+                }
                 
                 if (fanCharacteristic != null) {
                     Log.d(TAG, "Servicio del cooler encontrado")
                     updateNotification("Conectado", currentSpeed, currentTemp)
                     
                     try {
+                        @SuppressLint("MissingPermission")
                         if (BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
                             gatt.setCharacteristicNotification(fanCharacteristic, true)
                         }
@@ -214,7 +243,8 @@ class CoolerService : Service() {
                         Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
                     }
                 } else {
-                    Log.e(TAG, "Characteristic no encontrada")
+                    Log.e(TAG, "Fan characteristic no encontrada en ningún servicio")
+                    Log.d(TAG, "Servicios disponibles: ${gatt.services?.map { it.uuid } ?: emptyList()}")
                 }
             }
         }
@@ -273,6 +303,7 @@ class CoolerService : Service() {
                 characteristic.value = byteArrayOf(value)
                 
                 @Suppress("DEPRECATION")
+                @SuppressLint("MissingPermission")
                 val result = bluetoothGatt?.writeCharacteristic(characteristic)
                 
                 if (result == true) {

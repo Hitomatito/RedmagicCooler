@@ -1,5 +1,6 @@
 package com.hitomatito.redmagicooler
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -51,9 +52,7 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private var bluetoothGatt: BluetoothGatt? = null
-    
-    // UUIDs del protocolo RedMagic Cooler 5 Pro
-    private val serviceUUID = UUID.fromString("d52082ad-e805-9f97-9d4e-1c682d9c9ce6")
+
     private val fanCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
 
@@ -262,6 +261,7 @@ class MainActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         try {
+                            @SuppressLint("MissingPermission")
                             gatt.discoverServices()
                         } catch (e: SecurityException) {
                             Log.e(TAG, "SecurityException al descubrir servicios: ${e.message}")
@@ -282,32 +282,39 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "Servicios descubiertos")
-                    val service = gatt.getService(serviceUUID)
-                    if (service != null) {
-                        fanCharacteristic = service.getCharacteristic(fanCharacteristicUUID)
-                        if (fanCharacteristic != null) {
-                            statusMessage = "Listo para controlar"
-                            Log.d(TAG, "Characteristic del fan encontrada")
-                            Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
-                            
-                            // Habilitar notificaciones
-                            try {
-                                if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                                    return@runOnUiThread
-                                }
-                                gatt.setCharacteristicNotification(fanCharacteristic, true)
-                            } catch (e: SecurityException) {
-                                Log.e(TAG, "SecurityException habilitando notificaciones: ${e.message}")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
+                    
+                    // Buscar la característica del fan en todos los servicios disponibles
+                    fanCharacteristic = null
+                    for (service in gatt.services ?: emptyList()) {
+                        val characteristic = service.getCharacteristic(fanCharacteristicUUID)
+                        if (characteristic != null) {
+                            fanCharacteristic = characteristic
+                            Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
+                            break
+                        }
+                    }
+                    
+                    if (fanCharacteristic != null) {
+                        statusMessage = "Listo para controlar"
+                        Log.d(TAG, "Characteristic del fan encontrada")
+                        Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
+                        
+                        // Habilitar notificaciones
+                        try {
+                            if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
+                                return@runOnUiThread
                             }
-                        } else {
-                            statusMessage = "Error: Characteristic no encontrada"
-                            Log.e(TAG, "Fan characteristic no encontrada")
+                            @SuppressLint("MissingPermission")
+                            gatt.setCharacteristicNotification(fanCharacteristic, true)
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "SecurityException habilitando notificaciones: ${e.message}")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
                         }
                     } else {
-                        statusMessage = "Error: Servicio no encontrado"
-                        Log.e(TAG, "Servicio UUID no encontrado")
+                        statusMessage = "Error: Characteristic no encontrada"
+                        Log.e(TAG, "Fan characteristic no encontrada en ningún servicio")
+                        Log.d(TAG, "Servicios disponibles: ${gatt.services?.map { it.uuid } ?: emptyList()}")
                     }
                 } else {
                     statusMessage = "Error descubriendo servicios"
@@ -395,6 +402,7 @@ class MainActivity : ComponentActivity() {
                 characteristic.value = byteArrayOf(value)
                 @Suppress("DEPRECATION")
                 val result = try {
+                    @SuppressLint("MissingPermission")
                     bluetoothGatt?.writeCharacteristic(characteristic)
                 } catch (e: SecurityException) {
                     Log.e(TAG, "SecurityException al escribir: ${e.message}")
@@ -441,6 +449,7 @@ class MainActivity : ComponentActivity() {
                 
                 Log.d(TAG, "Leyendo estado del cooler...")
                 val result = try {
+                    @SuppressLint("MissingPermission")
                     bluetoothGatt?.readCharacteristic(characteristic)
                 } catch (e: SecurityException) {
                     Log.e(TAG, "SecurityException al leer: ${e.message}")
@@ -546,17 +555,7 @@ class MainActivity : ComponentActivity() {
             Log.d(TAG, "Modo automático activado - Servicio iniciado")
             Toast.makeText(this, "Modo Automático Activado\nPuedes cerrar la app", Toast.LENGTH_LONG).show()
             
-            // Desconectar GATT de la activity (el servicio manejará su propia conexión)
-            try {
-                if (BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                    bluetoothGatt?.disconnect()
-                    bluetoothGatt?.close()
-                }
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Error desconectando: ${e.message}")
-            }
-            bluetoothGatt = null
-            isConnected = false
+            // Nota: Mantener la conexión de MainActivity para controles manuales si es necesario
             
         } else {
             // Detener servicio
@@ -565,9 +564,9 @@ class MainActivity : ComponentActivity() {
             }
             stopService(serviceIntent)
             
-            statusMessage = "Modo manual - Reconecta el cooler"
+            statusMessage = "Modo manual - Control manual activo"
             Log.d(TAG, "Modo automático desactivado - Servicio detenido")
-            Toast.makeText(this, "Modo Manual Activado\nReconecta el cooler", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Modo Manual Activado", Toast.LENGTH_SHORT).show()
         }
     }
 }
