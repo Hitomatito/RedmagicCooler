@@ -19,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -30,10 +31,10 @@ class ThermalMonitor(private val context: Context) {
         private const val DEFAULT_UPDATE_INTERVAL_MS = 60000L // Intervalo predeterminado recomendado: 1 minuto
         
         // Rangos de temperatura (°C) para calibración automática
-        const val TEMP_SAFE = 35        // < 35°C: Sin preocupación
-        const val TEMP_WARM = 40        // 35-40°C: Calentamiento
-        const val TEMP_HOT = 45         // 40-45°C: Caliente
-        const val TEMP_CRITICAL = 50    // > 50°C: Crítico
+        const val TEMP_SAFE = 40        // < 40°C: Sin preocupación
+        const val TEMP_WARM = 50        // 40-50°C: Calentamiento
+        const val TEMP_HOT = 55         // 50-55°C: Caliente
+        const val TEMP_CRITICAL = 60    // > 60°C: Crítico
         
         // Umbral de estabilidad para evitar cambios frecuentes
         private const val MIN_SPEED_CHANGE = 10  // Cambio mínimo de velocidad: 10%
@@ -73,10 +74,10 @@ class ThermalMonitor(private val context: Context) {
     )
     
     enum class TempLevel {
-        SAFE,       // Verde: < 35°C
-        WARM,       // Amarillo: 35-40°C
-        HOT,        // Naranja: 40-45°C
-        CRITICAL    // Rojo: > 45°C
+        SAFE,       // Verde: < 40°C
+        WARM,       // Amarillo: 40-48°C
+        HOT,        // Naranja: 48-50°C
+        CRITICAL    // Rojo: > 50°C
     }
     
     /**
@@ -95,8 +96,12 @@ class ThermalMonitor(private val context: Context) {
                 try {
                     intervalCounter++
                     val thermalData = getCurrentThermalData(intervalCounter)
-                    onUpdate(thermalData)
+                    withContext(Dispatchers.Main) {
+                        onUpdate(thermalData)
+                    }
                     delay(updateIntervalMs)
+                } catch (e: kotlinx.coroutines.JobCancellationException) {
+                    Log.d(TAG, "Monitoreo cancelado: ${e.message}")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error en monitoreo: ${e.message}", e)
                     delay(updateIntervalMs)
@@ -293,11 +298,11 @@ class ThermalMonitor(private val context: Context) {
      * Con estabilización para evitar cambios frecuentes
      * 
      * Lógica de calibración:
-     * - < 35°C: 0% (apagado, no necesario)
-     * - 35-40°C: 25-50% (enfriamiento suave)
-     * - 40-45°C: 50-75% (enfriamiento activo)
-     * - 45-50°C: 75-100% (enfriamiento máximo)
-     * - > 50°C: 100% (emergencia)
+     * - < 40°C: 0% (apagado, no necesario)
+     * - 40-48°C: 25-50% (enfriamiento suave)
+     * - 48-50°C: 50-75% (enfriamiento activo)
+     * - 50-55°C: 75-100% (enfriamiento máximo)
+     * - > 55°C: 100% (emergencia)
      */
     private fun calculateRecommendedSpeed(temp: Float): Int {
         val rawSpeed = when {

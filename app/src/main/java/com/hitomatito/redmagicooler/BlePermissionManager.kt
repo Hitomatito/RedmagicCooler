@@ -26,6 +26,11 @@ object BlePermissionManager {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
         }
         
+        // Agregar permiso de notificaciones para Android 13+ (API 33+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        
         return permissions.toTypedArray()
     }
     
@@ -92,6 +97,21 @@ object BlePermissionManager {
     }
     
     /**
+     * Verifica si el permiso de notificaciones está concedido
+     * Para versiones anteriores a Android 13, siempre retorna true
+     */
+    fun hasNotificationPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true // No se requiere en versiones anteriores
+        }
+    }
+    
+    /**
      * Obtiene un mensaje descriptivo de los permisos faltantes
      */
     fun getMissingPermissionsMessage(context: Context): String {
@@ -104,6 +124,7 @@ object BlePermissionManager {
                 Manifest.permission.ACCESS_COARSE_LOCATION -> "Ubicación aproximada"
                 Manifest.permission.BLUETOOTH_CONNECT -> "Conexión Bluetooth"
                 Manifest.permission.BLUETOOTH_SCAN -> "Escaneo Bluetooth"
+                Manifest.permission.POST_NOTIFICATIONS -> "Notificaciones"
                 else -> permission.substringAfterLast(".")
             }
         }
