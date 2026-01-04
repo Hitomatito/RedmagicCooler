@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.RequiresApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -100,7 +101,7 @@ class ThermalMonitor(private val context: Context) {
                         onUpdate(thermalData)
                     }
                     delay(updateIntervalMs)
-                } catch (e: kotlinx.coroutines.JobCancellationException) {
+                } catch (e: CancellationException) {
                     Log.d(TAG, "Monitoreo cancelado: ${e.message}")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error en monitoreo: ${e.message}", e)
@@ -109,15 +110,7 @@ class ThermalMonitor(private val context: Context) {
             }
         }
     }
-    
-    /**
-     * Resetea el contador de intervalos
-     */
-    fun resetIntervalCounter() {
-        intervalCounter = 0
-        Log.d(TAG, "Contador de intervalos reseteado")
-    }
-    
+
     /**
      * Detiene el monitoreo de temperatura
      */
