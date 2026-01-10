@@ -6,14 +6,21 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +49,7 @@ class CoolerService : Service() {
     private lateinit var thermalMonitor: ThermalMonitor
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var bluetoothGatt: BluetoothGatt? = null
+    private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
     private var isConnected = false
     private var lastAutoAdjustTime = 0L
@@ -49,8 +57,19 @@ class CoolerService : Service() {
     private var currentSpeed = 0
     private var reconnectAttempts = 0
     private val maxReconnectAttempts = 5
+    private var isScanning = false
     
-    private val fanCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
+    // UUIDs descubiertos del log de la app original (cn.nubia.externdevice)
+    // UUID del servicio para filtrar en advertising/escaneo
+    private val coolerAdvertisingServiceUUID = UUID.fromString("00004a41-0000-1000-8000-00805f9b34fb")
+    // UUID del servicio principal del fan
+    private val coolerFanServiceUUID = UUID.fromString("d52082ad-e805-9f97-9d4e-1c682d9c9ce6")
+    // Characteristics del cooler
+    private val fanSpeedCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")  // Velocidad del fan
+    private val temperatureCharacteristicUUID = UUID.fromString("00001014-0000-1000-8000-00805f9b34fb")  // Temperatura
+    private val notificationCharacteristicUUID = UUID.fromString("00001015-0000-1000-8000-00805f9b34fb")  // Notificaciones
+    private val modeCharacteristicUUID = UUID.fromString("00001011-0000-1000-8000-00805f9b34fb")  // Modo de operación
+    private val statusCharacteristicUUID = UUID.fromString("00001013-0000-1000-8000-00805f9b34fb")  // Estado
     
     override fun onCreate() {
         super.onCreate()
@@ -87,6 +106,10 @@ class CoolerService : Service() {
         try {
             @SuppressLint("MissingPermission")
             if (BlePermissionManager.hasBluetoothConnectPermission(this)) {
+                if (isScanning) {
+                    bluetoothLeScanner?.stopScan(scanCallback)
+                    isScanning = false
+                }
                 bluetoothGatt?.disconnect()
                 bluetoothGatt?.close()
             }
@@ -168,15 +191,59 @@ class CoolerService : Service() {
                 return
             }
             
-            val device = bluetoothAdapter.getRemoteDevice(COOLER_MAC_ADDRESS)
-            bluetoothGatt = device.connectGatt(this, false, gattCallback)
+            bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
+            if (bluetoothLeScanner == null) {
+                Log.e(TAG, "BluetoothLeScanner no disponible")
+                stopSelf()
+                return
+            }
             
-            Log.d(TAG, "Conectando al cooler...")
+            // Configurar filtros para escanear dispositivos con el servicio del cooler
+            // Usamos el UUID de advertising que la app original usa para filtrar
+            val scanFilter = ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(coolerAdvertisingServiceUUID))
+                .build()
+            
+            val scanSettings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                .build()
+            
+            isScanning = true
+            Log.d(TAG, "Iniciando escaneo BLE para cooler con UUID: $coolerAdvertisingServiceUUID")
+            @SuppressLint("MissingPermission")
+            bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
+            
+            // Timeout de escaneo de 30 segundos
+            serviceScope.launch {
+                delay(30000L)
+                if (isScanning && !isConnected) {
+                    Log.w(TAG, "Timeout de escaneo, deteniendo...")
+                    try {
+                        @SuppressLint("MissingPermission")
+                        bluetoothLeScanner?.stopScan(scanCallback)
+                        isScanning = false
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error deteniendo escaneo por timeout: ${e.message}")
+                    }
+                    // Reintentar si no hemos excedido el límite
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++
+                        Log.d(TAG, "Reintentando escaneo tras timeout... (intento $reconnectAttempts/$maxReconnectAttempts)")
+                        delay(2000L)
+                        connectToCooler()
+                    } else {
+                        Log.w(TAG, "Máximo número de reintentos de escaneo alcanzado")
+                        updateNotification("Error de conexión", 0, currentTemp)
+                    }
+                }
+            }
+            
         } catch (e: SecurityException) {
             Log.e(TAG, "SecurityException: ${e.message}")
             stopSelf()
         } catch (e: Exception) {
-            Log.e(TAG, "Error conectando: ${e.message}")
+            Log.e(TAG, "Error iniciando escaneo: ${e.message}")
             stopSelf()
         }
     }
@@ -221,33 +288,62 @@ class CoolerService : Service() {
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                // Buscar la característica del fan en todos los servicios disponibles
-                fanCharacteristic = null
+                Log.d(TAG, "Servicios descubiertos exitosamente")
+                
+                // Listar todos los servicios disponibles
                 for (service in gatt.services ?: emptyList()) {
-                    val characteristic = service.getCharacteristic(fanCharacteristicUUID)
-                    if (characteristic != null) {
-                        fanCharacteristic = characteristic
-                        Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
-                        break
+                    Log.d(TAG, "Servicio encontrado: ${service.uuid}")
+                    for (char in service.characteristics) {
+                        Log.d(TAG, "  -> Characteristic: ${char.uuid}")
+                    }
+                }
+                
+                // Buscar primero en el servicio principal del fan (d52082ad-...)
+                var fanService = gatt.getService(coolerFanServiceUUID)
+                if (fanService != null) {
+                    Log.d(TAG, "Servicio del fan encontrado: $coolerFanServiceUUID")
+                    fanCharacteristic = fanService.getCharacteristic(fanSpeedCharacteristicUUID)
+                } else {
+                    // Fallback: buscar la característica en todos los servicios
+                    Log.d(TAG, "Servicio del fan no encontrado, buscando en todos los servicios...")
+                    fanCharacteristic = null
+                    for (service in gatt.services ?: emptyList()) {
+                        val characteristic = service.getCharacteristic(fanSpeedCharacteristicUUID)
+                        if (characteristic != null) {
+                            fanCharacteristic = characteristic
+                            Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
+                            break
+                        }
                     }
                 }
                 
                 if (fanCharacteristic != null) {
-                    Log.d(TAG, "Servicio del cooler encontrado")
+                    Log.d(TAG, "Fan characteristic encontrada: $fanSpeedCharacteristicUUID")
                     updateNotification("Conectado", currentSpeed, currentTemp)
                     
                     try {
                         @SuppressLint("MissingPermission")
                         if (BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
+                            // Habilitar notificaciones en la characteristic de notificaciones
+                            val notifCharacteristic = fanService?.getCharacteristic(notificationCharacteristicUUID)
+                            if (notifCharacteristic != null) {
+                                gatt.setCharacteristicNotification(notifCharacteristic, true)
+                                Log.d(TAG, "Notificaciones habilitadas en: $notificationCharacteristicUUID")
+                            }
+                            // También en la characteristic del fan
                             gatt.setCharacteristicNotification(fanCharacteristic, true)
                         }
                     } catch (e: SecurityException) {
                         Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
                     }
                 } else {
-                    Log.e(TAG, "Fan characteristic no encontrada en ningún servicio")
+                    Log.e(TAG, "Fan characteristic NO encontrada en ningún servicio")
                     Log.d(TAG, "Servicios disponibles: ${gatt.services?.map { it.uuid } ?: emptyList()}")
+                    updateNotification("Error: servicio no encontrado", 0, currentTemp)
                 }
+            } else {
+                Log.e(TAG, "Error descubriendo servicios, status: $status")
+                updateNotification("Error descubriendo servicios", 0, currentTemp)
             }
         }
         
@@ -260,6 +356,69 @@ class CoolerService : Service() {
                 } else 0
                 currentSpeed = MainActivity.mapRawToPercent(value)
                 Log.d(TAG, "Velocidad aplicada: $value (${currentSpeed}%)")
+            }
+        }
+    }
+    
+    private val scanCallback = object : ScanCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            val deviceName = device.name ?: "Unknown"
+            val rssi = result.rssi
+            
+            Log.d(TAG, "Dispositivo encontrado: $deviceName (${device.address}) RSSI: $rssi")
+            Log.d(TAG, "ScanRecord: ${result.scanRecord}")
+            
+            // Verificar que sea un cooler RedMagic por el nombre
+            if (deviceName.contains("Magcooler", ignoreCase = true) || 
+                deviceName.contains("RM ", ignoreCase = true) ||
+                deviceName.contains("RedMagic", ignoreCase = true)) {
+                
+                isScanning = false
+                
+                // Detener escaneo una vez encontrado el dispositivo
+                try {
+                    bluetoothLeScanner?.stopScan(this)
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Error deteniendo escaneo: ${e.message}")
+                }
+                
+                // Conectar al dispositivo encontrado usando autoConnect=true para reconexiones automáticas
+                // Como hace la app original: "no need bond, do connect" y "autoConnect=true"
+                Log.d(TAG, "Conectando al cooler: $deviceName...")
+                updateNotification("Conectando a $deviceName...", 0, currentTemp)
+                
+                bluetoothGatt = device.connectGatt(
+                    this@CoolerService, 
+                    true,  // autoConnect=true para reconexión automática como la app original
+                    gattCallback,
+                    BluetoothDevice.TRANSPORT_LE  // Forzar transporte BLE
+                )
+            }
+        }
+        
+        override fun onScanFailed(errorCode: Int) {
+            isScanning = false
+            val errorMsg = when (errorCode) {
+                SCAN_FAILED_ALREADY_STARTED -> "Escaneo ya iniciado"
+                SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "Error de registro de app"
+                SCAN_FAILED_INTERNAL_ERROR -> "Error interno"
+                SCAN_FAILED_FEATURE_UNSUPPORTED -> "Característica no soportada"
+                else -> "Error desconocido ($errorCode)"
+            }
+            Log.e(TAG, "Escaneo falló: $errorMsg")
+            
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++
+                Log.d(TAG, "Reintentando escaneo... (intento $reconnectAttempts/$maxReconnectAttempts)")
+                serviceScope.launch {
+                    delay(3000L)
+                    connectToCooler()
+                }
+            } else {
+                Log.w(TAG, "Máximo número de reintentos de escaneo alcanzado")
+                updateNotification("Error: No se encontró cooler", 0, currentTemp)
             }
         }
     }

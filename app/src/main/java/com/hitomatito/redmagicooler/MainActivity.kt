@@ -2,16 +2,23 @@ package com.hitomatito.redmagicooler
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelUuid
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -54,8 +61,15 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private var bluetoothGatt: BluetoothGatt? = null
+    private var bluetoothLeScanner: BluetoothLeScanner? = null
+    private var isScanning = false
 
-    private val fanCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
+    // UUIDs descubiertos del log de la app original (cn.nubia.externdevice)
+    private val coolerAdvertisingServiceUUID = UUID.fromString("00004a41-0000-1000-8000-00805f9b34fb")
+    private val coolerFanServiceUUID = UUID.fromString("d52082ad-e805-9f97-9d4e-1c682d9c9ce6")
+    private val fanSpeedCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
+    private val notificationCharacteristicUUID = UUID.fromString("00001015-0000-1000-8000-00805f9b34fb")
+    
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
 
     // Estados observables para la UI
@@ -207,51 +221,110 @@ class MainActivity : ComponentActivity() {
 
         try {
             // Verificar permisos antes de cualquier operación BLE
-            if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                statusMessage = "Permiso BLUETOOTH_CONNECT requerido"
+            if (!BlePermissionManager.hasBluetoothConnectPermission(this) || 
+                !BlePermissionManager.hasBluetoothScanPermission(this)) {
+                statusMessage = "Permisos BLE requeridos"
                 isConnecting = false
-                Toast.makeText(this, "Permiso BLUETOOTH_CONNECT requerido", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Permisos BLE requeridos", Toast.LENGTH_SHORT).show()
                 return
             }
             
             isConnecting = true
-            statusMessage = "Conectando al cooler..."
-            Log.d(TAG, "Intentando conectar a $COOLER_MAC_ADDRESS")
-            
-            val device = try {
-                bluetoothAdapter.getRemoteDevice(COOLER_MAC_ADDRESS)
-            } catch (e: SecurityException) {
-                Log.e(TAG, "SecurityException al obtener dispositivo: ${e.message}")
-                statusMessage = "Error de permisos"
-                isConnecting = false
-                Toast.makeText(this, "Error de permisos BLE", Toast.LENGTH_SHORT).show()
-                return
-            }
+            statusMessage = "Buscando cooler..."
             
             // Cerrar conexión anterior si existe
             try {
+                if (isScanning) {
+                    @SuppressLint("MissingPermission")
+                    bluetoothLeScanner?.stopScan(bleScanCallback)
+                    isScanning = false
+                }
                 bluetoothGatt?.close()
             } catch (e: SecurityException) {
-                Log.w(TAG, "SecurityException al cerrar GATT: ${e.message}")
+                Log.w(TAG, "SecurityException al cerrar: ${e.message}")
             }
             
-            // Conectar con autoConnect = false para conexión directa
-            bluetoothGatt = try {
-                device.connectGatt(this, false, gattCallback)
-            } catch (e: SecurityException) {
-                Log.e(TAG, "SecurityException al conectar GATT: ${e.message}")
-                statusMessage = "Error de permisos al conectar"
+            // Iniciar escaneo BLE para encontrar el cooler
+            bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
+            if (bluetoothLeScanner == null) {
+                Log.e(TAG, "BluetoothLeScanner no disponible")
+                statusMessage = "Escáner BLE no disponible"
                 isConnecting = false
-                Toast.makeText(this, "Error de permisos al conectar", Toast.LENGTH_SHORT).show()
                 return
             }
-            Log.d(TAG, "connectGatt llamado exitosamente")
+            
+            // Configurar filtro por Service UUID del cooler (como hace la app original)
+            val scanFilter = ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(coolerAdvertisingServiceUUID))
+                .build()
+            
+            val scanSettings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                .build()
+            
+            Log.d(TAG, "Iniciando escaneo BLE con UUID: $coolerAdvertisingServiceUUID")
+            isScanning = true
+            
+            @SuppressLint("MissingPermission")
+            bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, bleScanCallback)
             
         } catch (e: Exception) {
             Log.e(TAG, "Error al conectar: ${e.message}", e)
             statusMessage = "Error: ${e.message}"
             isConnecting = false
+            isScanning = false
             Toast.makeText(this, "Error de conexión: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+    
+    private val bleScanCallback = object : ScanCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            val deviceName = device.name ?: "Unknown"
+            
+            Log.d(TAG, "Dispositivo encontrado: $deviceName (${device.address}) RSSI: ${result.rssi}")
+            
+            // Verificar que sea un cooler RedMagic
+            if (deviceName.contains("Magcooler", ignoreCase = true) || 
+                deviceName.contains("RM ", ignoreCase = true) ||
+                deviceName.contains("RedMagic", ignoreCase = true)) {
+                
+                isScanning = false
+                bluetoothLeScanner?.stopScan(this)
+                
+                runOnUiThread {
+                    statusMessage = "Conectando a $deviceName..."
+                }
+                
+                Log.d(TAG, "Cooler encontrado, conectando...")
+                
+                // Conectar usando autoConnect=true como la app original
+                bluetoothGatt = device.connectGatt(
+                    this@MainActivity,
+                    true,  // autoConnect=true para reconexión automática
+                    gattCallback,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+            }
+        }
+        
+        override fun onScanFailed(errorCode: Int) {
+            isScanning = false
+            val errorMsg = when (errorCode) {
+                SCAN_FAILED_ALREADY_STARTED -> "Escaneo ya iniciado"
+                SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "Error de registro"
+                SCAN_FAILED_INTERNAL_ERROR -> "Error interno"
+                SCAN_FAILED_FEATURE_UNSUPPORTED -> "No soportado"
+                else -> "Error ($errorCode)"
+            }
+            Log.e(TAG, "Escaneo falló: $errorMsg")
+            runOnUiThread {
+                isConnecting = false
+                statusMessage = "Error: $errorMsg"
+                Toast.makeText(this@MainActivity, "Error de escaneo: $errorMsg", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -260,7 +333,17 @@ class MainActivity : ComponentActivity() {
             if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
                 return
             }
+            // Detener escaneo si está activo
+            if (isScanning) {
+                @SuppressLint("MissingPermission")
+                bluetoothLeScanner?.stopScan(bleScanCallback)
+                isScanning = false
+            }
             bluetoothGatt?.disconnect()
+            bluetoothGatt?.close()
+            bluetoothGatt = null
+            fanCharacteristic = null
+            isConnecting = false
             statusMessage = "Desconectado"
             Log.d(TAG, "Desconectado del cooler")
         } catch (e: SecurityException) {
@@ -309,28 +392,52 @@ class MainActivity : ComponentActivity() {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             runOnUiThread {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "Servicios descubiertos")
+                    Log.d(TAG, "Servicios descubiertos exitosamente")
                     
-                    // Buscar la característica del fan en todos los servicios disponibles
-                    fanCharacteristic = null
+                    // Listar todos los servicios para debug
                     for (service in gatt.services ?: emptyList()) {
-                        val characteristic = service.getCharacteristic(fanCharacteristicUUID)
-                        if (characteristic != null) {
-                            fanCharacteristic = characteristic
-                            Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
-                            break
+                        Log.d(TAG, "Servicio: ${service.uuid}")
+                        for (char in service.characteristics) {
+                            Log.d(TAG, "  -> Characteristic: ${char.uuid}")
+                        }
+                    }
+                    
+                    // Buscar primero en el servicio principal del fan (d52082ad-...)
+                    var fanService = gatt.getService(coolerFanServiceUUID)
+                    if (fanService != null) {
+                        Log.d(TAG, "Servicio del fan encontrado: $coolerFanServiceUUID")
+                        fanCharacteristic = fanService.getCharacteristic(fanSpeedCharacteristicUUID)
+                    } else {
+                        // Fallback: buscar en todos los servicios
+                        Log.d(TAG, "Servicio del fan no encontrado, buscando en todos...")
+                        fanCharacteristic = null
+                        for (service in gatt.services ?: emptyList()) {
+                            val characteristic = service.getCharacteristic(fanSpeedCharacteristicUUID)
+                            if (characteristic != null) {
+                                fanCharacteristic = characteristic
+                                fanService = service
+                                Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
+                                break
+                            }
                         }
                     }
                     
                     if (fanCharacteristic != null) {
                         statusMessage = "Listo para controlar"
-                        Log.d(TAG, "Characteristic del fan encontrada")
+                        Log.d(TAG, "Fan characteristic encontrada: $fanSpeedCharacteristicUUID")
                         Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
                         
                         // Habilitar notificaciones
                         try {
                             if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
                                 return@runOnUiThread
+                            }
+                            // Habilitar notificaciones en characteristic de notificaciones
+                            val notifChar = fanService?.getCharacteristic(notificationCharacteristicUUID)
+                            if (notifChar != null) {
+                                @SuppressLint("MissingPermission")
+                                gatt.setCharacteristicNotification(notifChar, true)
+                                Log.d(TAG, "Notificaciones habilitadas en: $notificationCharacteristicUUID")
                             }
                             @SuppressLint("MissingPermission")
                             gatt.setCharacteristicNotification(fanCharacteristic, true)
@@ -341,7 +448,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         statusMessage = "Error: Characteristic no encontrada"
-                        Log.e(TAG, "Fan characteristic no encontrada en ningún servicio")
+                        Log.e(TAG, "Fan characteristic NO encontrada")
                         Log.d(TAG, "Servicios disponibles: ${gatt.services?.map { it.uuid } ?: emptyList()}")
                     }
                 } else {
