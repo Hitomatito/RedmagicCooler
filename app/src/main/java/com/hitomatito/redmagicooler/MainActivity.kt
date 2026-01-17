@@ -390,8 +390,15 @@ class MainActivity : ComponentActivity() {
             bluetoothGatt = null
             fanCharacteristic = null
             lightCharacteristic = null
+            isConnected = false  // CRÍTICO: Actualizar estado de conexión
             isConnecting = false
             statusMessage = "Desconectado"
+            
+            // Detener monitoreo térmico si no hay servicio automático corriendo
+            if (!isServiceRunning(CoolerService::class.java)) {
+                thermalMonitor.stopMonitoring()
+            }
+            
             Log.d(TAG, "Desconectado del cooler")
         } catch (e: SecurityException) {
             Log.e(TAG, "SecurityException al desconectar: ${e.message}", e)
