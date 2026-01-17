@@ -44,6 +44,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -62,6 +63,7 @@ import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import java.util.UUID
 
 @Suppress("OVERRIDE_DEPRECATION")
@@ -85,7 +87,7 @@ class MainActivity : ComponentActivity() {
     private var isConnected by mutableStateOf(false)
     private var isConnecting by mutableStateOf(false)
     private var statusMessage by mutableStateOf("Listo para conectar")
-    private var useRawMode by mutableStateOf(false)
+    private var currentCoolerSpeed by mutableIntStateOf(50) // Velocidad actual del cooler en %
     
     // Monitor térmico y modo automático
     private lateinit var thermalMonitor: ThermalMonitor
@@ -187,13 +189,12 @@ class MainActivity : ComponentActivity() {
                                 isConnected = isConnected,
                                 isConnecting = isConnecting,
                                 statusMessage = statusMessage,
-                                useRawMode = useRawMode,
                                 isAutoMode = isAutoMode,
+                                currentCoolerSpeed = currentCoolerSpeed,
                                 thermalData = thermalData,
                                 onConnect = { checkPermissionsAndConnect() },
                                 onDisconnect = { disconnectFromCooler() },
                                 onSetFanSpeed = { speed -> setFanSpeed(speed) },
-                                onToggleRawMode = { useRawMode = !useRawMode },
                                 onToggleAutoMode = { toggleAutoMode() },
                                 onNavigateToRGB = { navController.navigate("rgb") },
                                 modifier = Modifier.padding(innerPadding)
@@ -503,6 +504,11 @@ class MainActivity : ComponentActivity() {
                             }
                             @SuppressLint("MissingPermission")
                             gatt.setCharacteristicNotification(fanCharacteristic, true)
+                            
+                            // Leer velocidad actual del cooler al conectarse
+                            @SuppressLint("MissingPermission")
+                            gatt.readCharacteristic(fanCharacteristic)
+                            Log.d(TAG, "Solicitando lectura de velocidad actual...")
                         } catch (e: SecurityException) {
                             Log.e(TAG, "SecurityException habilitando notificaciones: ${e.message}")
                         } catch (e: Exception) {
@@ -546,9 +552,12 @@ class MainActivity : ComponentActivity() {
                     @Suppress("DEPRECATION")
                     val data = characteristic.value
                     if (data != null && data.isNotEmpty()) {
-                        val speed = data[0].toInt() and 0xFF
-                        Log.d(TAG, "Velocidad leída: $speed")
-                        statusMessage = "Velocidad actual: $speed"
+                        val rawSpeed = data[0].toInt() and 0xFF
+                        // Convertir de raw (40-80) a porcentaje (0-100%)
+                        val speedPercent = mapRawToPercent(rawSpeed)
+                        currentCoolerSpeed = speedPercent
+                        Log.d(TAG, "Velocidad leída: $rawSpeed raw → $speedPercent%")
+                        statusMessage = "Velocidad actual: $speedPercent%"
                     }
                 } else {
                     Log.e(TAG, "Error leyendo characteristic: $status")
@@ -585,15 +594,11 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 
-                // En modo raw: usar valor directo; en modo normal: mapear 0-100% a 40-80
-                val rawValue = if (useRawMode) {
-                    speed.coerceIn(0, 255)
-                } else {
-                    mapPercentToRaw(speed.coerceIn(0, 100))
-                }
+                // Mapear porcentaje (0-100%) a rango del cooler (40-80)
+                val rawValue = mapPercentToRaw(speed.coerceIn(0, 100))
                 
                 val value = rawValue.toByte()
-                Log.d(TAG, "Estableciendo velocidad del fan: $rawValue (0x${String.format("%02X", value)}) [Modo: ${if (useRawMode) "Raw" else "Normal"}]")
+                Log.d(TAG, "Estableciendo velocidad del fan: $speed% → $rawValue raw (0x${String.format("%02X", value)})")
                 
                 @Suppress("DEPRECATION")
                 characteristic.value = byteArrayOf(value)
@@ -867,19 +872,38 @@ fun CoolerControlScreen(
     isConnected: Boolean,
     isConnecting: Boolean,
     statusMessage: String,
-    useRawMode: Boolean,
     isAutoMode: Boolean,
+    currentCoolerSpeed: Int,
     thermalData: ThermalMonitor.ThermalData,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onSetFanSpeed: (Int) -> Unit,
-    onToggleRawMode: () -> Unit,
     onToggleAutoMode: () -> Unit,
     onNavigateToRGB: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var fanSpeed by remember { mutableIntStateOf(50) }
+    var isApplying by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
+
+    // Sincronizar fanSpeed con la velocidad real del cooler al conectarse
+    LaunchedEffect(currentCoolerSpeed, isConnected) {
+        if (isConnected && currentCoolerSpeed != fanSpeed) {
+            fanSpeed = currentCoolerSpeed
+            Log.d("CoolerControlScreen", "Velocidad sincronizada: $currentCoolerSpeed%")
+        }
+    }
+
+    // Aplicación automática con debounce de 500ms
+    LaunchedEffect(fanSpeed, isConnected, isAutoMode) {
+        if (isConnected && !isAutoMode) {
+            isApplying = true
+            delay(500) // Esperar 500ms sin cambios
+            onSetFanSpeed(fanSpeed)
+            delay(300)
+            isApplying = false
+        }
+    }
 
     Column(
         modifier = modifier
@@ -1093,7 +1117,7 @@ fun CoolerControlScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp)
+                    modifier = Modifier.padding(20.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1102,89 +1126,145 @@ fun CoolerControlScreen(
                     ) {
                         Text(
                             text = if (isAutoMode) "Control Manual (Deshabilitado)" else "Control de Velocidad",
-                            style = MaterialTheme.typography.titleMedium
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
                         )
-                        Button(
-                            onClick = onToggleRawMode,
-                            enabled = !isAutoMode,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (useRawMode) MaterialTheme.colorScheme.tertiary
-                                else MaterialTheme.colorScheme.secondary
+                        if (isApplying && !isAutoMode) {
+                            Text(
+                                text = "⏳",
+                                style = MaterialTheme.typography.titleMedium
                             )
-                        ) {
-                            Text(if (useRawMode) "Modo Raw" else "Modo Normal")
                         }
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = if (useRawMode) 
-                            "Rango: 0-255 (Valor directo al hardware)"
-                        else 
-                            "Rango: 0-100% → Hardware: 40-80",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = if (useRawMode) {
-                            "Valor Raw: $fanSpeed"
-                        } else {
-                            "Velocidad: $fanSpeed% (Raw: ${MainActivity.mapPercentToRaw(fanSpeed)})"
-                        },
-                        style = MaterialTheme.typography.headlineSmall
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Spacer(modifier = Modifier.height(20.dp))
+                    
+                    // Display de velocidad prominente
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "$fanSpeed%",
+                                style = MaterialTheme.typography.displayLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Hardware: ${MainActivity.mapPercentToRaw(fanSpeed)}/80",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(20.dp))
+                    
+                    // Slider
                     Slider(
                         value = fanSpeed.toFloat(),
                         onValueChange = { fanSpeed = it.toInt() },
-                        valueRange = if (useRawMode) 0f..255f else 0f..100f,
-                        steps = if (useRawMode) 254 else 99,
+                        valueRange = 0f..100f,
+                        steps = 99,
                         enabled = !isAutoMode
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
                     
-                    // Botones rápidos de velocidad
-                    Text("Velocidades Rápidas:", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = { fanSpeed = if (useRawMode) 40 else 0; onSetFanSpeed(fanSpeed) },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isAutoMode,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            )
-                        ) {
-                            Text(if (useRawMode) "40" else "0%")
-                        }
-                        Button(
-                            onClick = { fanSpeed = if (useRawMode) 60 else 50; onSetFanSpeed(fanSpeed) },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isAutoMode
-                        ) {
-                            Text(if (useRawMode) "60" else "50%")
-                        }
-                        Button(
-                            onClick = { fanSpeed = if (useRawMode) 80 else 100; onSetFanSpeed(fanSpeed) },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isAutoMode,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primary
-                            )
-                        ) {
-                            Text(if (useRawMode) "80" else "100%")
-                        }
-                    }
+                    Text(
+                        text = "Ajusta el slider para cambiar la velocidad",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    
+                    Spacer(modifier = Modifier.height(24.dp))
+                    
+                    // Botones rápidos mejorados
+                    Text(
+                        text = "🎯 Velocidades Preestablecidas",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = { onSetFanSpeed(fanSpeed) },
+                    
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !isAutoMode
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Aplicar Velocidad")
+                        // Botón Apagado/Mínimo
+                        Button(
+                            onClick = { 
+                                fanSpeed = 0
+                                onSetFanSpeed(0)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAutoMode,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("❄️ Mínimo", fontWeight = FontWeight.Bold)
+                                Text("0%", style = MaterialTheme.typography.titleMedium)
+                            }
+                        }
+                        
+                        // Botón Medio
+                        Button(
+                            onClick = { 
+                                fanSpeed = 50
+                                onSetFanSpeed(50)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAutoMode,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("🌬️ Medio", fontWeight = FontWeight.Bold)
+                                Text("50%", style = MaterialTheme.typography.titleMedium)
+                            }
+                        }
+                        
+                        // Botón Máximo
+                        Button(
+                            onClick = { 
+                                fanSpeed = 100
+                                onSetFanSpeed(100)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isAutoMode,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("💨 Máximo", fontWeight = FontWeight.Bold)
+                                Text("100%", style = MaterialTheme.typography.titleMedium)
+                            }
+                        }
                     }
                 }
             }
@@ -1200,8 +1280,8 @@ fun CoolerControlScreenPreview() {
             isConnected = true,
             isConnecting = false,
             statusMessage = "Listo para controlar",
-            useRawMode = false,
             isAutoMode = false,
+            currentCoolerSpeed = 50,
             thermalData = ThermalMonitor.ThermalData(
                 batteryTemp = 38.5f,
                 maxTemp = 38.5f,
@@ -1211,7 +1291,6 @@ fun CoolerControlScreenPreview() {
             onConnect = {},
             onDisconnect = {},
             onSetFanSpeed = {},
-            onToggleRawMode = {},
             onToggleAutoMode = {},
             onNavigateToRGB = {}
         )
