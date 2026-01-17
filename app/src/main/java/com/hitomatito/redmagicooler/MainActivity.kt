@@ -84,8 +84,6 @@ class MainActivity : ComponentActivity() {
     // Estados observables para la UI
     private var isConnected by mutableStateOf(false)
     private var isConnecting by mutableStateOf(false)
-    private var currentFanSpeed by mutableIntStateOf(0)
-    private var currentTemp by mutableIntStateOf(0)
     private var statusMessage by mutableStateOf("Listo para conectar")
     private var useRawMode by mutableStateOf(false)
     
@@ -188,8 +186,6 @@ class MainActivity : ComponentActivity() {
                             CoolerControlScreen(
                                 isConnected = isConnected,
                                 isConnecting = isConnecting,
-                                currentFanSpeed = currentFanSpeed,
-                                currentTemp = currentTemp,
                                 statusMessage = statusMessage,
                                 useRawMode = useRawMode,
                                 isAutoMode = isAutoMode,
@@ -197,7 +193,6 @@ class MainActivity : ComponentActivity() {
                                 onConnect = { checkPermissionsAndConnect() },
                                 onDisconnect = { disconnectFromCooler() },
                                 onSetFanSpeed = { speed -> setFanSpeed(speed) },
-                                onReadStatus = { readStatus() },
                                 onToggleRawMode = { useRawMode = !useRawMode },
                                 onToggleAutoMode = { toggleAutoMode() },
                                 onNavigateToRGB = { navController.navigate("rgb") },
@@ -551,9 +546,9 @@ class MainActivity : ComponentActivity() {
                     @Suppress("DEPRECATION")
                     val data = characteristic.value
                     if (data != null && data.isNotEmpty()) {
-                        currentFanSpeed = data[0].toInt() and 0xFF
-                        Log.d(TAG, "Velocidad leída: $currentFanSpeed")
-                        statusMessage = "Velocidad actual: $currentFanSpeed"
+                        val speed = data[0].toInt() and 0xFF
+                        Log.d(TAG, "Velocidad leída: $speed")
+                        statusMessage = "Velocidad actual: $speed"
                     }
                 } else {
                     Log.e(TAG, "Error leyendo characteristic: $status")
@@ -647,48 +642,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun readStatus() {
-        if (!isConnected) {
-            // Toast.makeText(this, "No conectado al cooler", Toast.LENGTH_SHORT).show() // Removido
-            return
-        }
-
-        fanCharacteristic?.let { characteristic ->
-            try {
-                if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                    // Toast.makeText(this, "Permiso BLUETOOTH_CONNECT requerido", Toast.LENGTH_SHORT).show() // Removido
-                    return
-                }
-                
-                Log.d(TAG, "Leyendo estado del cooler...")
-                val result = try {
-                    @SuppressLint("MissingPermission")
-                    bluetoothGatt?.readCharacteristic(characteristic)
-                } catch (e: SecurityException) {
-                    Log.e(TAG, "SecurityException al leer: ${e.message}")
-                    statusMessage = "Error de permisos al leer"
-                    // Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show() // Removido
-                    false
-                }
-                
-                if (result == true) {
-                    statusMessage = "Leyendo estado..."
-                } else {
-                    statusMessage = "Error leyendo estado"
-                    Toast.makeText(this, "Error al leer estado", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "SecurityException leyendo estado: ${e.message}", e)
-                Toast.makeText(this, "Error de permisos", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error leyendo estado: ${e.message}", e)
-                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-        } ?: run {
-            Toast.makeText(this, "Servicio no disponible", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     override fun onDestroy() {
         super.onDestroy()
         try {
@@ -726,7 +679,6 @@ class MainActivity : ComponentActivity() {
     private fun startThermalMonitoring() {
         thermalMonitor.startMonitoring(monitoringScope) { data ->
             thermalData = data
-            currentTemp = data.maxTemp.toInt()
             
             // Si modo automático está activo, conectado, y no hay servicio corriendo, ajustar velocidad
             if (isAutoMode && isConnected && !isServiceRunning(CoolerService::class.java)) {
@@ -914,8 +866,6 @@ class MainActivity : ComponentActivity() {
 fun CoolerControlScreen(
     isConnected: Boolean,
     isConnecting: Boolean,
-    currentFanSpeed: Int,
-    currentTemp: Int,
     statusMessage: String,
     useRawMode: Boolean,
     isAutoMode: Boolean,
@@ -923,7 +873,6 @@ fun CoolerControlScreen(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onSetFanSpeed: (Int) -> Unit,
-    onReadStatus: () -> Unit,
     onToggleRawMode: () -> Unit,
     onToggleAutoMode: () -> Unit,
     onNavigateToRGB: () -> Unit,
@@ -1138,47 +1087,8 @@ fun CoolerControlScreen(
         
         Spacer(modifier = Modifier.height(16.dp))
         
-        // Información del cooler
+        // Control de velocidad
         if (isConnected) {
-            Card(
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp)
-                ) {
-                    Text(
-                        text = "Información del Cooler",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Velocidad Actual:")
-                        Text("$currentFanSpeed%", style = MaterialTheme.typography.titleMedium)
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Temperatura:")
-                        Text("$currentTemp°C", style = MaterialTheme.typography.titleMedium)
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = onReadStatus,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Actualizar Estado")
-                    }
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(24.dp))
-            
-            // Control de velocidad
             Card(
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -1289,8 +1199,6 @@ fun CoolerControlScreenPreview() {
         CoolerControlScreen(
             isConnected = true,
             isConnecting = false,
-            currentFanSpeed = 42,
-            currentTemp = 32,
             statusMessage = "Listo para controlar",
             useRawMode = false,
             isAutoMode = false,
@@ -1303,7 +1211,6 @@ fun CoolerControlScreenPreview() {
             onConnect = {},
             onDisconnect = {},
             onSetFanSpeed = {},
-            onReadStatus = {},
             onToggleRawMode = {},
             onToggleAutoMode = {},
             onNavigateToRGB = {}
