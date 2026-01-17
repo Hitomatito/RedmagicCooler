@@ -23,6 +23,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+// BuildConfig simple para debug
+private object BuildConfig {
+    const val DEBUG = true // Cambiar a false para producción
+}
+
 /**
  * Monitor de temperatura del dispositivo para controlar el cooler
  */
@@ -61,6 +66,10 @@ class ThermalMonitor(private val context: Context) {
     // Contador de intervalos de actualización
     private var intervalCounter: Int = 0
     
+    // Caché de rutas térmicas para optimización
+    private val thermalZoneCache = mutableMapOf<Int, Pair<File, File>>()
+    private var thermalCacheInitialized = false
+    
     data class ThermalData(
         val batteryTemp: Float = 0f,          // Temperatura de batería
         val cpuTemp: Float = 0f,              // Temperatura de CPU (si disponible)
@@ -90,22 +99,31 @@ class ThermalMonitor(private val context: Context) {
     ) {
         stopMonitoring()
         
-        monitoringJob = scope.launch(Dispatchers.Default) {
+        monitoringJob = scope.launch(Dispatchers.IO) {
             Log.d(TAG, "Iniciando monitoreo de temperatura")
             
             while (isActive) {
                 try {
+                    // Verificar si el dispositivo está en Doze mode o App Standby
+                    val isIdle = powerManager?.isDeviceIdleMode == true || powerManager?.isPowerSaveMode == true
+                    if (isIdle) {
+                        Log.d(TAG, "Dispositivo en modo idle (Doze/Standby), pausando monitoreo por 5 minutos")
+                        delay(300000L) // Pausar 5 minutos
+                        continue
+                    }
+                    
                     intervalCounter++
                     val thermalData = getCurrentThermalData(intervalCounter)
                     withContext(Dispatchers.Main) {
                         onUpdate(thermalData)
                     }
-                    delay(updateIntervalMs)
+                    val adaptiveInterval = getAdaptiveInterval(thermalData.tempLevel)
+                    delay(adaptiveInterval)
                 } catch (e: CancellationException) {
                     Log.d(TAG, "Monitoreo cancelado: ${e.message}")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error en monitoreo: ${e.message}", e)
-                    delay(updateIntervalMs)
+                    delay(30000L) // Delay fijo en caso de error
                 }
             }
         }
@@ -209,14 +227,50 @@ class ThermalMonitor(private val context: Context) {
     }
     
     /**
-     * Lee temperaturas de las zonas térmicas del sistema
+     * Lee temperaturas de las zonas térmicas del sistema (optimizado con caché)
      * Estos archivos suelen contener la temperatura del CPU, GPU y otros componentes
      * Devuelve un mapa de tipo de zona a temperatura
      */
     private fun readThermalZones(): Map<String, Float> {
         val temps = mutableMapOf<String, Float>()
         
-        for (i in 0..20) { // Probar más zonas térmicas
+        // Inicializar caché en el primer uso
+        if (!thermalCacheInitialized) {
+            initThermalCache()
+        }
+        
+        // Leer solo de zonas térmicas válidas en caché
+        for ((zoneId, filePair) in thermalZoneCache) {
+            try {
+                val (tempFile, typeFile) = filePair
+                
+                val tempStr = tempFile.readText().trim()
+                val typeStr = typeFile.readText().trim().lowercase()
+                
+                val temp = tempStr.toFloatOrNull()
+                
+                if (temp != null && temp > 0) {
+                    // Los valores pueden estar en miligramos (dividir por 1000) o ya en grados
+                    val normalizedTemp = if (temp > 200) temp / 1000f else temp
+                    
+                    // Filtrar valores absurdos (< 0 o > 100°C)
+                    if (normalizedTemp in 0f..100f) {
+                        temps[typeStr] = normalizedTemp
+                    }
+                }
+            } catch (_: Exception) {
+                // Ignorar errores de lectura silenciosamente
+            }
+        }
+        
+        return temps
+    }
+    
+    /**
+     * Inicializa el caché de zonas térmicas válidas (ejecutado una sola vez)
+     */
+    private fun initThermalCache() {
+        for (i in 0..30) { // Buscar hasta 30 zonas térmicas
             val tempPath = "/sys/class/thermal/thermal_zone$i/temp"
             val typePath = "/sys/class/thermal/thermal_zone$i/type"
             
@@ -225,28 +279,15 @@ class ThermalMonitor(private val context: Context) {
                 val typeFile = File(typePath)
                 
                 if (tempFile.exists() && tempFile.canRead() && typeFile.exists() && typeFile.canRead()) {
-                    val tempStr = tempFile.readText().trim()
-                    val typeStr = typeFile.readText().trim().lowercase()
-                    
-                    val temp = tempStr.toFloatOrNull()
-                    
-                    if (temp != null && temp > 0) {
-                        // Los valores pueden estar en miligramos (dividir por 1000) o ya en grados
-                        val normalizedTemp = if (temp > 200) temp / 1000f else temp
-                        
-                        // Filtrar valores absurdos (< 0 o > 100°C)
-                        if (normalizedTemp in 0f..100f) {
-                            temps[typeStr] = normalizedTemp
-                            Log.v(TAG, "Temp de zona $i ($typeStr): ${"%.1f".format(normalizedTemp)}°C")
-                        }
-                    }
+                    thermalZoneCache[i] = Pair(tempFile, typeFile)
                 }
             } catch (_: Exception) {
-                // Ignorar errores de lectura silenciosamente, muchos paths pueden no existir
+                // Ignorar
             }
         }
         
-        return temps
+        thermalCacheInitialized = true
+        Log.d(TAG, "Caché térmico inicializado: ${thermalZoneCache.size} zonas válidas encontradas")
     }
     
     /**
@@ -330,13 +371,26 @@ class ThermalMonitor(private val context: Context) {
         return if (speedDiff >= MIN_SPEED_CHANGE) {
             // Cambio significativo: actualizar
             speedChangeCounter++
-            Log.d(TAG, "Temp: ${"%.1f".format(temp)}°C → Cambio de velocidad: $lastRecommendedSpeed% → $rawSpeed% (cambio #$speedChangeCounter)")
+            if (BuildConfig.DEBUG || temp >= TEMP_HOT) {
+                Log.d(TAG, "Temp: ${"%.1f".format(temp)}°C → Cambio de velocidad: $lastRecommendedSpeed% → $rawSpeed% (cambio #$speedChangeCounter)")
+            }
             lastRecommendedSpeed = rawSpeed
             rawSpeed
         } else {
             // Cambio pequeño: mantener velocidad anterior (estabilidad)
-            Log.v(TAG, "Temp: ${"%.1f".format(temp)}°C → Velocidad estable: $lastRecommendedSpeed% (nuevo: $rawSpeed%, diff: ${speedDiff}%)")
             lastRecommendedSpeed
+        }
+    }
+    
+    /**
+     * Calcula el intervalo adaptativo de monitoreo basado en el nivel de temperatura
+     */
+    fun getAdaptiveInterval(tempLevel: TempLevel): Long {
+        return when (tempLevel) {
+            TempLevel.SAFE -> 60000L      // 60 segundos si seguro
+            TempLevel.WARM -> 30000L      // 30 segundos si tibio
+            TempLevel.HOT -> 15000L       // 15 segundos si caliente
+            TempLevel.CRITICAL -> 5000L   // 5 segundos si crítico
         }
     }
 }

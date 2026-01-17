@@ -31,6 +31,11 @@ object BlePermissionManager {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         
+        // Agregar permiso para alarmas exactas en Android 12+ (API 31+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.SCHEDULE_EXACT_ALARM)
+        }
+        
         return permissions.toTypedArray()
     }
     
@@ -39,6 +44,27 @@ object BlePermissionManager {
      */
     fun hasAllPermissions(context: Context): Boolean {
         return getRequiredPermissions().all { permission ->
+            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+    
+    /**
+     * Verifica si los permisos BLE críticos están concedidos (excluye permisos opcionales como SCHEDULE_EXACT_ALARM)
+     * Útil para servicios en background donde algunos permisos son opcionales
+     */
+    fun hasCriticalBlePermissions(context: Context): Boolean {
+        val critical = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        
+        // Agregar permisos BLE para Android 12+ (API 31+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            critical.add(Manifest.permission.BLUETOOTH_CONNECT)
+            critical.add(Manifest.permission.BLUETOOTH_SCAN)
+        }
+        
+        return critical.all { permission ->
             ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
         }
     }
@@ -112,6 +138,21 @@ object BlePermissionManager {
     }
     
     /**
+     * Verifica si el permiso SCHEDULE_EXACT_ALARM está concedido
+     * Para versiones anteriores a Android 12, siempre retorna true
+     */
+    fun hasScheduleExactAlarmPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.SCHEDULE_EXACT_ALARM
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true // No se requiere en versiones anteriores
+        }
+    }
+    
+    /**
      * Obtiene un mensaje descriptivo de los permisos faltantes
      */
     fun getMissingPermissionsMessage(context: Context): String {
@@ -125,6 +166,7 @@ object BlePermissionManager {
                 Manifest.permission.BLUETOOTH_CONNECT -> "Conexión Bluetooth"
                 Manifest.permission.BLUETOOTH_SCAN -> "Escaneo Bluetooth"
                 Manifest.permission.POST_NOTIFICATIONS -> "Notificaciones"
+                Manifest.permission.SCHEDULE_EXACT_ALARM -> "Alarmas exactas"
                 else -> permission.substringAfterLast(".")
             }
         }

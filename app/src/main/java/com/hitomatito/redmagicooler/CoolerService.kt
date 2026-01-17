@@ -1,6 +1,7 @@
 package com.hitomatito.redmagicooler
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -17,7 +18,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
@@ -44,10 +48,27 @@ class CoolerService : Service() {
         
         const val ACTION_START_AUTO = "com.hitomatito.redmagicooler.START_AUTO"
         const val ACTION_STOP_AUTO = "com.hitomatito.redmagicooler.STOP_AUTO"
+        const val ACTION_RECONNECT = "com.hitomatito.redmagicooler.RECONNECT"
+        
+        // SharedPreferences keys
+        private const val PREFS_NAME = "cooler_service_prefs"
+        private const val KEY_LAST_TEMP = "last_temperature"
+        private const val KEY_LAST_SPEED = "last_speed"
+        private const val KEY_DEAD_OBJECT_COUNT = "dead_object_count"
+        private const val KEY_DEAD_OBJECT_DATE = "dead_object_date"
+        private const val MAX_DEAD_OBJECT_PER_DAY = 10
+        
+        // Logging condicional - CAMBIAR A FALSE PARA PRODUCCIÓN
+        // En producción, solo se mostrarán logs de error/warning, ahorrando ~1-2MB de memoria
+        private const val DEBUG = true
+        
+        // Métricas de batería
+        private const val KEY_BATTERY_START = "battery_start_level"
+        private const val KEY_BATTERY_START_TIME = "battery_start_time"
     }
     
     private lateinit var thermalMonitor: ThermalMonitor
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var bluetoothGatt: BluetoothGatt? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
@@ -58,6 +79,8 @@ class CoolerService : Service() {
     private var reconnectAttempts = 0
     private val maxReconnectAttempts = 5
     private var isScanning = false
+    private var lastNotificationTime = 0L
+    private var reconnectBackoffMs = 2000L // Backoff inicial
     
     // UUIDs descubiertos del log de la app original (cn.nubia.externdevice)
     // UUID del servicio para filtrar en advertising/escaneo
@@ -73,13 +96,21 @@ class CoolerService : Service() {
     
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Servicio creado")
+        logDebug("Servicio creado")
+        
+        // Inicializar métricas de batería
+        initBatteryMetrics()
         
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification("Iniciando...", 0, 0f))
+        
+        // Restaurar estado guardado
+        loadState()
+        
+        startForeground(NOTIFICATION_ID, createNotification("Iniciando...", currentSpeed, currentTemp))
         
         thermalMonitor = ThermalMonitor(this)
-        thermalMonitor.startAmbientSensor()
+        // No iniciar sensor ambiental en background para ahorrar batería
+        // thermalMonitor.startAmbientSensor()
         
         connectToCooler()
         startThermalMonitoring()
@@ -90,6 +121,9 @@ class CoolerService : Service() {
             ACTION_STOP_AUTO -> {
                 stopSelf()
             }
+            ACTION_RECONNECT -> {
+                connectToCooler()
+            }
         }
         return START_STICKY
     }
@@ -98,7 +132,13 @@ class CoolerService : Service() {
     
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "Servicio destruido")
+        logDebug("Servicio destruido")
+        
+        // Mostrar métricas finales de batería
+        logBatteryMetrics()
+        
+        // Guardar estado antes de destruir
+        saveState()
         
         thermalMonitor.stopMonitoring()
         serviceScope.cancel()
@@ -129,7 +169,7 @@ class CoolerService : Service() {
                 setShowBadge(false)
             }
             
-            val notificationManager = getSystemService(NotificationManager::class.java)
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
         }
     }
@@ -170,13 +210,21 @@ class CoolerService : Service() {
     
     private fun updateNotification(status: String, speed: Int, temp: Float) {
         val notification = createNotification(status, speed, temp)
-        val notificationManager = getSystemService(NotificationManager::class.java)
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
     
+    private fun updateNotificationIfNeeded(status: String, speed: Int, temp: Float) {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastNotificationTime > 30000L) { // 30 segundos
+            updateNotification(status, speed, temp)
+            lastNotificationTime = currentTime
+        }
+    }
+    
     private fun connectToCooler() {
-        if (!BlePermissionManager.hasAllPermissions(this)) {
-            Log.e(TAG, "Permisos BLE faltantes")
+        if (!BlePermissionManager.hasCriticalBlePermissions(this)) {
+            Log.e(TAG, "Permisos BLE críticos faltantes")
             stopSelf()
             return
         }
@@ -205,7 +253,7 @@ class CoolerService : Service() {
                 .build()
             
             val scanSettings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build()
             
@@ -214,11 +262,11 @@ class CoolerService : Service() {
             @SuppressLint("MissingPermission")
             bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
             
-            // Timeout de escaneo de 30 segundos
+            // Timeout de escaneo optimizado (20 segundos)
             serviceScope.launch {
-                delay(30000L)
+                delay(20000L)
                 if (isScanning && !isConnected) {
-                    Log.w(TAG, "Timeout de escaneo, deteniendo...")
+                    logDebug("Timeout de escaneo, deteniendo...")
                     try {
                         @SuppressLint("MissingPermission")
                         bluetoothLeScanner?.stopScan(scanCallback)
@@ -254,11 +302,13 @@ class CoolerService : Service() {
                 BluetoothProfile.STATE_CONNECTED -> {
                     isConnected = true
                     reconnectAttempts = 0 // Resetear contador de reintentos
+                    reconnectBackoffMs = 2000L // Resetear backoff
                     Log.d(TAG, "Conectado al cooler")
                     
                     try {
                         @SuppressLint("MissingPermission")
                         if (BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
+                            // BLE sin emparejamiento - el cooler funciona sin bonding
                             gatt.discoverServices()
                         }
                     } catch (e: SecurityException) {
@@ -270,14 +320,56 @@ class CoolerService : Service() {
                     Log.d(TAG, "Desconectado del cooler, status: $status")
                     updateNotification("Desconectado", 0, currentTemp)
                     
+                    // Diferenciar tipos de desconexión
+                    val isIntentionalDisconnect = status == BluetoothGatt.GATT_SUCCESS
+                    val isOutOfRange = status == 8 || status == 19 || status == 133 // Códigos típicos de fuera de rango
+                    val isError = status != BluetoothGatt.GATT_SUCCESS && !isOutOfRange
+                    
+                    when {
+                        isIntentionalDisconnect -> {
+                            Log.d(TAG, "Desconexión intencional, no reconectar")
+                            return
+                        }
+                        isOutOfRange -> {
+                            Log.w(TAG, "Dispositivo fuera de rango, pausando reintentos por 1 minuto")
+                            reconnectBackoffMs = 60000L // 1 minuto
+                        }
+                        isError -> {
+                            Log.e(TAG, "Error de conexión detectado")
+                        }
+                    }
+                    
                     // Intentar reconectar automáticamente si no hemos excedido el límite
                     if (reconnectAttempts < maxReconnectAttempts) {
                         reconnectAttempts++
-                        Log.d(TAG, "Intentando reconectar... (intento $reconnectAttempts/$maxReconnectAttempts)")
-                        serviceScope.launch {
-                            delay(5000L) // Esperar 5 segundos antes de reconectar
-                            connectToCooler()
+                        Log.d(TAG, "Programando reconexión... (intento $reconnectAttempts/$maxReconnectAttempts, backoff: ${reconnectBackoffMs}ms)")
+                        
+                        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
+                        val intent = Intent(this@CoolerService, CoolerService::class.java).apply {
+                            action = ACTION_RECONNECT
                         }
+                        val pendingIntent = PendingIntent.getService(
+                            this@CoolerService, 0, intent,
+                            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                        )
+                        
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+                            Log.w(TAG, "No se puede programar alarmas exactas, usando inexactas")
+                            // Fallback a inexactas
+                            alarmManager.setAndAllowWhileIdle(
+                                AlarmManager.RTC_WAKEUP,
+                                System.currentTimeMillis() + reconnectBackoffMs,
+                                pendingIntent
+                            )
+                        } else {
+                            alarmManager.setExactAndAllowWhileIdle(
+                                AlarmManager.RTC_WAKEUP,
+                                System.currentTimeMillis() + reconnectBackoffMs,
+                                pendingIntent
+                            )
+                        }
+                        
+                        reconnectBackoffMs = (reconnectBackoffMs * 2).coerceAtMost(30000L) // Máximo 30s
                     } else {
                         Log.w(TAG, "Máximo número de reintentos alcanzado, deteniendo servicio")
                         stopSelf()
@@ -289,9 +381,30 @@ class CoolerService : Service() {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.d(TAG, "Servicios descubiertos exitosamente")
+                Log.d(TAG, "GATT conectado: ${gatt.device.address}, servicios count: ${gatt.services?.size ?: 0}")
+                
+                // Verificar que GATT tenga servicios antes de procesar
+                val services = gatt.services
+                if (services == null || services.isEmpty()) {
+                    Log.e(TAG, "Lista de servicios es null o vacía, esperando...")
+                    // Reintentar descubrimiento después de un breve delay
+                    serviceScope.launch {
+                        delay(1000L)
+                        try {
+                            @SuppressLint("MissingPermission")
+                            if (BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService) && isConnected) {
+                                Log.d(TAG, "Reintentando descubrimiento de servicios...")
+                                gatt.discoverServices()
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error reintentando descubrimiento: ${e.message}")
+                        }
+                    }
+                    return
+                }
                 
                 // Listar todos los servicios disponibles
-                for (service in gatt.services ?: emptyList()) {
+                for (service in services) {
                     Log.d(TAG, "Servicio encontrado: ${service.uuid}")
                     for (char in service.characteristics) {
                         Log.d(TAG, "  -> Characteristic: ${char.uuid}")
@@ -443,47 +556,196 @@ class CoolerService : Service() {
                     ThermalMonitor.TempLevel.CRITICAL -> "⚠️ Crítico"
                 }
                 
-                updateNotification(tempStatus, currentSpeed, currentTemp)
+                updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
             } else {
-                updateNotification("Esperando conexión", 0, currentTemp)
+                updateNotificationIfNeeded("Esperando conexión", 0, currentTemp)
             }
         }
     }
     
     private fun setFanSpeed(speed: Int) {
+        if (!isConnected || bluetoothGatt == null) {
+            logDebug("Saltando ajuste de velocidad: no conectado")
+            return
+        }
+        
         fanCharacteristic?.let { characteristic ->
-            try {
-                if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                    return
-                }
-                
-                val rawValue = MainActivity.mapPercentToRaw(speed.coerceIn(0, 100))
-                val value = rawValue.toByte()
-                
-                @Suppress("DEPRECATION")
-                characteristic.value = byteArrayOf(value)
-                
-                @Suppress("DEPRECATION")
-                @SuppressLint("MissingPermission")
-                val result = bluetoothGatt?.writeCharacteristic(characteristic)
-                
-                if (result == true) {
-                    Log.d(TAG, "Ajustando velocidad automáticamente: $speed% (raw: $rawValue)")
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "SecurityException escribiendo: ${e.message}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error escribiendo: ${e.message}")
-                if (e is android.os.DeadObjectException) {
-                    // Bluetooth se reinició, forzar reconexión
-                    Log.w(TAG, "DeadObjectException: Bluetooth desconectado inesperadamente, reconectando...")
-                    isConnected = false
-                    bluetoothGatt?.close()
-                    bluetoothGatt = null
-                    fanCharacteristic = null
-                    connectToCooler()
+            serviceScope.launch {
+                try {
+                    if (!BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
+                        return@launch
+                    }
+                    
+                    val rawValue = MainActivity.mapPercentToRaw(speed.coerceIn(0, 100))
+                    val value = rawValue.toByte()
+                    
+                    @Suppress("DEPRECATION")
+                    characteristic.value = byteArrayOf(value)
+                    
+                    @Suppress("DEPRECATION")
+                    @SuppressLint("MissingPermission")
+                    val result = bluetoothGatt?.writeCharacteristic(characteristic)
+                    
+                    if (result == true) {
+                        currentSpeed = speed
+                        logDebug("Ajustando velocidad automáticamente: $speed% (raw: $rawValue)")
+                    }
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "SecurityException escribiendo: ${e.message}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error escribiendo: ${e.message}")
+                    if (e is android.os.DeadObjectException) {
+                        // Verificar límite diario de DeadObjectException
+                        if (checkAndIncrementDeadObjectCount()) {
+                            Log.w(TAG, "DeadObjectException: Bluetooth desconectado inesperadamente, reconectando...")
+                            isConnected = false
+                            bluetoothGatt?.close()
+                            bluetoothGatt = null
+                            fanCharacteristic = null
+                            connectToCooler()
+                        } else {
+                            Log.e(TAG, "Límite diario de DeadObjectException alcanzado, deteniendo servicio")
+                            stopSelf()
+                        }
+                    }
                 }
             }
+        }
+    }
+    
+    private fun saveState() {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            prefs.edit().apply {
+                putFloat(KEY_LAST_TEMP, currentTemp)
+                putInt(KEY_LAST_SPEED, currentSpeed)
+                apply()
+            }
+            Log.d(TAG, "Estado guardado: temp=$currentTemp, speed=$currentSpeed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error guardando estado: ${e.message}")
+        }
+    }
+    
+    private fun loadState() {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            currentTemp = prefs.getFloat(KEY_LAST_TEMP, 0f)
+            currentSpeed = prefs.getInt(KEY_LAST_SPEED, 0)
+            Log.d(TAG, "Estado restaurado: temp=$currentTemp, speed=$currentSpeed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error cargando estado: ${e.message}")
+        }
+    }
+    
+    private fun checkAndIncrementDeadObjectCount(): Boolean {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            val today = System.currentTimeMillis() / (24 * 60 * 60 * 1000) // Día actual
+            val lastDay = prefs.getLong(KEY_DEAD_OBJECT_DATE, 0)
+            var count = prefs.getInt(KEY_DEAD_OBJECT_COUNT, 0)
+            
+            // Resetear contador si es un nuevo día
+            if (today != lastDay) {
+                count = 0
+            }
+            
+            // Verificar si hemos alcanzado el límite
+            if (count >= MAX_DEAD_OBJECT_PER_DAY) {
+                Log.w(TAG, "Límite diario de DeadObjectException alcanzado: $count/$MAX_DEAD_OBJECT_PER_DAY")
+                return false
+            }
+            
+            // Incrementar contador
+            count++
+            prefs.edit().apply {
+                putInt(KEY_DEAD_OBJECT_COUNT, count)
+                putLong(KEY_DEAD_OBJECT_DATE, today)
+                apply()
+            }
+            
+            Log.d(TAG, "DeadObjectException count: $count/$MAX_DEAD_OBJECT_PER_DAY hoy")
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error verificando límite de DeadObjectException: ${e.message}")
+            return true // En caso de error, permitir reconexión
+        }
+    }
+    
+    // Funciones de logging condicional
+    private fun logDebug(message: String) {
+        if (DEBUG) {
+            Log.d(TAG, message)
+        }
+    }
+    
+    private fun logVerbose(message: String) {
+        if (DEBUG) {
+            Log.v(TAG, message)
+        }
+    }
+    
+    // Funciones de métricas de batería
+    private fun initBatteryMetrics() {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            val batteryLevel = getCurrentBatteryLevel()
+            val currentTime = System.currentTimeMillis()
+            
+            prefs.edit().apply {
+                putInt(KEY_BATTERY_START, batteryLevel)
+                putLong(KEY_BATTERY_START_TIME, currentTime)
+                apply()
+            }
+            
+            logDebug("Métricas iniciales: Batería=$batteryLevel%")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error inicializando métricas de batería: ${e.message}")
+        }
+    }
+    
+    private fun logBatteryMetrics() {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            val startLevel = prefs.getInt(KEY_BATTERY_START, -1)
+            val startTime = prefs.getLong(KEY_BATTERY_START_TIME, 0)
+            
+            if (startLevel >= 0 && startTime > 0) {
+                val endLevel = getCurrentBatteryLevel()
+                val endTime = System.currentTimeMillis()
+                val batteryUsed = startLevel - endLevel
+                val durationMinutes = (endTime - startTime) / 60000
+                
+                if (durationMinutes > 0) {
+                    val batteryPerHour = (batteryUsed.toFloat() / durationMinutes) * 60
+                    Log.i(TAG, "=== MÉTRICAS DE BATERÍA ===")
+                    Log.i(TAG, "Duración: ${durationMinutes}min")
+                    Log.i(TAG, "Batería inicial: $startLevel%")
+                    Log.i(TAG, "Batería final: $endLevel%")
+                    Log.i(TAG, "Batería usada: $batteryUsed%")
+                    Log.i(TAG, "Consumo estimado: ${"%.2f".format(batteryPerHour)}%/hora")
+                    Log.i(TAG, "=========================")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error calculando métricas de batería: ${e.message}")
+        }
+    }
+    
+    private fun getCurrentBatteryLevel(): Int {
+        return try {
+            val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            
+            if (level >= 0 && scale > 0) {
+                (level * 100 / scale.toFloat()).toInt()
+            } else {
+                -1
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error obteniendo nivel de batería: ${e.message}")
+            -1
         }
     }
 }
