@@ -65,6 +65,12 @@ class CoolerService : Service() {
         // Métricas de batería
         private const val KEY_BATTERY_START = "battery_start_level"
         private const val KEY_BATTERY_START_TIME = "battery_start_time"
+        
+        // Instancia estática para acceso desde MainActivity (control RGB en modo auto)
+        @Volatile
+        private var instance: CoolerService? = null
+        
+        fun getInstance(): CoolerService? = instance
     }
     
     private lateinit var thermalMonitor: ThermalMonitor
@@ -72,6 +78,7 @@ class CoolerService : Service() {
     private var bluetoothGatt: BluetoothGatt? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
+    private var lightCharacteristic: BluetoothGattCharacteristic? = null
     private var isConnected = false
     private var lastAutoAdjustTime = 0L
     private var currentTemp = 0f
@@ -92,10 +99,11 @@ class CoolerService : Service() {
     private val temperatureCharacteristicUUID = UUID.fromString("00001014-0000-1000-8000-00805f9b34fb")  // Temperatura
     private val notificationCharacteristicUUID = UUID.fromString("00001015-0000-1000-8000-00805f9b34fb")  // Notificaciones
     private val modeCharacteristicUUID = UUID.fromString("00001011-0000-1000-8000-00805f9b34fb")  // Modo de operación
-    private val statusCharacteristicUUID = UUID.fromString("00001013-0000-1000-8000-00805f9b34fb")  // Estado
+    private val lightCharacteristicUUID = UUID.fromString("00001013-0000-1000-8000-00805f9b34fb")  // Control de luz RGB
     
     override fun onCreate() {
         super.onCreate()
+        instance = this // Guardar instancia para acceso externo
         logDebug("Servicio creado")
         
         // Inicializar métricas de batería
@@ -132,6 +140,7 @@ class CoolerService : Service() {
     
     override fun onDestroy() {
         super.onDestroy()
+        instance = null // Limpiar instancia
         logDebug("Servicio destruido")
         
         // Mostrar métricas finales de batería
@@ -416,22 +425,34 @@ class CoolerService : Service() {
                 if (fanService != null) {
                     Log.d(TAG, "Servicio del fan encontrado: $coolerFanServiceUUID")
                     fanCharacteristic = fanService.getCharacteristic(fanSpeedCharacteristicUUID)
+                    lightCharacteristic = fanService.getCharacteristic(lightCharacteristicUUID)
                 } else {
                     // Fallback: buscar la característica en todos los servicios
                     Log.d(TAG, "Servicio del fan no encontrado, buscando en todos los servicios...")
                     fanCharacteristic = null
+                    lightCharacteristic = null
                     for (service in gatt.services ?: emptyList()) {
-                        val characteristic = service.getCharacteristic(fanSpeedCharacteristicUUID)
-                        if (characteristic != null) {
-                            fanCharacteristic = characteristic
+                        val fanChar = service.getCharacteristic(fanSpeedCharacteristicUUID)
+                        if (fanChar != null) {
+                            fanCharacteristic = fanChar
                             Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
-                            break
                         }
+                        val lightChar = service.getCharacteristic(lightCharacteristicUUID)
+                        if (lightChar != null) {
+                            lightCharacteristic = lightChar
+                            Log.d(TAG, "Light characteristic encontrada en servicio: ${service.uuid}")
+                        }
+                        if (fanCharacteristic != null && lightCharacteristic != null) break
                     }
                 }
                 
                 if (fanCharacteristic != null) {
                     Log.d(TAG, "Fan characteristic encontrada: $fanSpeedCharacteristicUUID")
+                    if (lightCharacteristic != null) {
+                        Log.d(TAG, "Light characteristic encontrada: $lightCharacteristicUUID")
+                    } else {
+                        Log.w(TAG, "Light characteristic NO encontrada")
+                    }
                     updateNotification("Conectado", currentSpeed, currentTemp)
                     
                     try {
@@ -462,13 +483,18 @@ class CoolerService : Service() {
         
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                @Suppress("DEPRECATION")
-                val data = characteristic.value
-                val value = if (data != null && data.isNotEmpty()) {
-                    data[0].toInt() and 0xFF
-                } else 0
-                currentSpeed = MainActivity.mapRawToPercent(value)
-                Log.d(TAG, "Velocidad aplicada: $value (${currentSpeed}%)")
+                // Verificar UUID para diferenciar entre velocidad y luz RGB
+                if (characteristic.uuid == fanSpeedCharacteristicUUID) {
+                    @Suppress("DEPRECATION")
+                    val data = characteristic.value
+                    val value = if (data != null && data.isNotEmpty()) {
+                        data[0].toInt() and 0xFF
+                    } else 0
+                    currentSpeed = MainActivity.mapRawToPercent(value)
+                    Log.d(TAG, "Velocidad aplicada: $value (${currentSpeed}%)")
+                } else if (characteristic.uuid == lightCharacteristicUUID) {
+                    Log.d(TAG, "Configuración RGB aplicada exitosamente")
+                }
             }
         }
     }
@@ -684,6 +710,84 @@ class CoolerService : Service() {
             Log.v(TAG, message)
         }
     }
+    
+    /**
+     * Enums y funciones para control RGB del cooler
+     */
+    enum class LightEffect(val code: Byte) {
+        COLORFUL(0x01),          // Modo colorido/arcoíris
+        BREATH_FULLCOLOR(0x02),  // Respiración con cambio de color completo
+        BREATH_SINGLE(0x03),     // Respiración con un solo color
+        ALWAYS_BRIGHT(0x04)      // Siempre encendido con color fijo
+    }
+    
+    /**
+     * Establece el color y efecto de luz RGB del cooler
+     * @param effect Efecto de luz a aplicar
+     * @param red Componente rojo (0-255)
+     * @param green Componente verde (0-255)
+     * @param blue Componente azul (0-255)
+     */
+    fun setRGBLight(effect: LightEffect, red: Int = 0, green: Int = 0, blue: Int = 0) {
+        if (!isConnected || lightCharacteristic == null) {
+            Log.w(TAG, "No se puede establecer luz: ${if (!isConnected) "no conectado" else "característica no disponible"}")
+            return
+        }
+        
+        serviceScope.launch {
+            try {
+                if (!BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
+                    return@launch
+                }
+                
+                // Formato: [modo][RR][GG][BB]
+                val command = byteArrayOf(
+                    effect.code,
+                    red.toByte(),
+                    green.toByte(),
+                    blue.toByte()
+                )
+                
+                @Suppress("DEPRECATION")
+                lightCharacteristic?.value = command
+                
+                @Suppress("DEPRECATION")
+                @SuppressLint("MissingPermission")
+                val result = bluetoothGatt?.writeCharacteristic(lightCharacteristic)
+                
+                if (result == true) {
+                    val hexColor = "%02x%02x%02x%02x".format(
+                        effect.code.toInt() and 0xFF,
+                        red and 0xFF,
+                        green and 0xFF,
+                        blue and 0xFF
+                    )
+                    Log.d(TAG, "Comando RGB enviado: $hexColor (efecto: ${effect.name}, R:$red G:$green B:$blue)")
+                } else {
+                    Log.e(TAG, "Error enviando comando RGB")
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "SecurityException en setRGBLight: ${e.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error en setRGBLight: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Atajos para efectos comunes
+     */
+    fun setColorful() = setRGBLight(LightEffect.COLORFUL)
+    
+    fun setBreathFullColor() = setRGBLight(LightEffect.BREATH_FULLCOLOR)
+    
+    fun setBreathSingleColor(red: Int, green: Int, blue: Int) = 
+        setRGBLight(LightEffect.BREATH_SINGLE, red, green, blue)
+    
+    fun setAlwaysBright(red: Int, green: Int, blue: Int) = 
+        setRGBLight(LightEffect.ALWAYS_BRIGHT, red, green, blue)
+    
+    fun turnOffLight() = setRGBLight(LightEffect.ALWAYS_BRIGHT, 0, 0, 0)
     
     // Funciones de métricas de batería
     private fun initBatteryMetrics() {

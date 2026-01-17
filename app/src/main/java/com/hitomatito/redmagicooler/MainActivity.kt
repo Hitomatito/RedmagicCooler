@@ -33,6 +33,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -49,9 +51,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.ui.theme.RedmagiCoolerTheme
+import com.hitomatito.redmagicooler.ui.RGBControlScreen
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -69,8 +76,10 @@ class MainActivity : ComponentActivity() {
     private val coolerFanServiceUUID = UUID.fromString("d52082ad-e805-9f97-9d4e-1c682d9c9ce6")
     private val fanSpeedCharacteristicUUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
     private val notificationCharacteristicUUID = UUID.fromString("00001015-0000-1000-8000-00805f9b34fb")
+    private val lightCharacteristicUUID = UUID.fromString("00001013-0000-1000-8000-00805f9b34fb")
     
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
+    private var lightCharacteristic: BluetoothGattCharacteristic? = null
 
     // Estados observables para la UI
     private var isConnected by mutableStateOf(false)
@@ -168,24 +177,47 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             RedmagiCoolerTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    CoolerControlScreen(
-                        isConnected = isConnected,
-                        isConnecting = isConnecting,
-                        currentFanSpeed = currentFanSpeed,
-                        currentTemp = currentTemp,
-                        statusMessage = statusMessage,
-                        useRawMode = useRawMode,
-                        isAutoMode = isAutoMode,
-                        thermalData = thermalData,
-                        onConnect = { checkPermissionsAndConnect() },
-                        onDisconnect = { disconnectFromCooler() },
-                        onSetFanSpeed = { speed -> setFanSpeed(speed) },
-                        onReadStatus = { readStatus() },
-                        onToggleRawMode = { useRawMode = !useRawMode },
-                        onToggleAutoMode = { toggleAutoMode() },
-                        modifier = Modifier.padding(innerPadding)
-                    )
+                val navController = rememberNavController()
+                
+                NavHost(
+                    navController = navController,
+                    startDestination = "main"
+                ) {
+                    composable("main") {
+                        Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                            CoolerControlScreen(
+                                isConnected = isConnected,
+                                isConnecting = isConnecting,
+                                currentFanSpeed = currentFanSpeed,
+                                currentTemp = currentTemp,
+                                statusMessage = statusMessage,
+                                useRawMode = useRawMode,
+                                isAutoMode = isAutoMode,
+                                thermalData = thermalData,
+                                onConnect = { checkPermissionsAndConnect() },
+                                onDisconnect = { disconnectFromCooler() },
+                                onSetFanSpeed = { speed -> setFanSpeed(speed) },
+                                onReadStatus = { readStatus() },
+                                onToggleRawMode = { useRawMode = !useRawMode },
+                                onToggleAutoMode = { toggleAutoMode() },
+                                onNavigateToRGB = { navController.navigate("rgb") },
+                                modifier = Modifier.padding(innerPadding)
+                            )
+                        }
+                    }
+                    
+                    composable("rgb") {
+                        RGBControlScreen(
+                            isConnected = isConnected,
+                            isAutoMode = isAutoMode,
+                            onNavigateBack = { navController.popBackStack() },
+                            onSetColorful = { setColorful() },
+                            onSetBreathFullColor = { setBreathFullColor() },
+                            onSetBreathSingleColor = { r: Int, g: Int, b: Int -> setBreathSingleColor(r, g, b) },
+                            onSetAlwaysBright = { r: Int, g: Int, b: Int -> setAlwaysBright(r, g, b) },
+                            onTurnOffLight = { turnOffLight() }
+                        )
+                    }
                 }
             }
         }
@@ -357,6 +389,7 @@ class MainActivity : ComponentActivity() {
             bluetoothGatt?.close()
             bluetoothGatt = null
             fanCharacteristic = null
+            lightCharacteristic = null
             isConnecting = false
             statusMessage = "Desconectado"
             Log.d(TAG, "Desconectado del cooler")
@@ -393,6 +426,7 @@ class MainActivity : ComponentActivity() {
                         statusMessage = "Desconectado"
                         Log.d(TAG, "Desconectado del cooler, status: $status")
                         fanCharacteristic = null
+                        lightCharacteristic = null
                         
                         // Detener monitoreo térmico si no hay servicio automático corriendo
                         if (!isServiceRunning(CoolerService::class.java)) {
@@ -421,24 +455,36 @@ class MainActivity : ComponentActivity() {
                     if (fanService != null) {
                         Log.d(TAG, "Servicio del fan encontrado: $coolerFanServiceUUID")
                         fanCharacteristic = fanService.getCharacteristic(fanSpeedCharacteristicUUID)
+                        lightCharacteristic = fanService.getCharacteristic(lightCharacteristicUUID)
                     } else {
                         // Fallback: buscar en todos los servicios
                         Log.d(TAG, "Servicio del fan no encontrado, buscando en todos...")
                         fanCharacteristic = null
+                        lightCharacteristic = null
                         for (service in gatt.services ?: emptyList()) {
-                            val characteristic = service.getCharacteristic(fanSpeedCharacteristicUUID)
-                            if (characteristic != null) {
-                                fanCharacteristic = characteristic
+                            val fanChar = service.getCharacteristic(fanSpeedCharacteristicUUID)
+                            if (fanChar != null) {
+                                fanCharacteristic = fanChar
                                 fanService = service
                                 Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
-                                break
                             }
+                            val lightChar = service.getCharacteristic(lightCharacteristicUUID)
+                            if (lightChar != null) {
+                                lightCharacteristic = lightChar
+                                Log.d(TAG, "Light characteristic encontrada en servicio: ${service.uuid}")
+                            }
+                            if (fanCharacteristic != null && lightCharacteristic != null) break
                         }
                     }
                     
                     if (fanCharacteristic != null) {
                         statusMessage = "Listo para controlar"
                         Log.d(TAG, "Fan characteristic encontrada: $fanSpeedCharacteristicUUID")
+                        if (lightCharacteristic != null) {
+                            Log.d(TAG, "Light characteristic encontrada: $lightCharacteristicUUID")
+                        } else {
+                            Log.w(TAG, "Light characteristic NO encontrada")
+                        }
                         Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
                         
                         // Habilitar notificaciones
@@ -753,6 +799,108 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+    
+    /**
+     * Enums y funciones para control RGB del cooler
+     */
+    enum class LightEffect(val code: Byte) {
+        COLORFUL(0x01),          // Modo colorido/arcoíris
+        BREATH_FULLCOLOR(0x02),  // Respiración con cambio de color completo
+        BREATH_SINGLE(0x03),     // Respiración con un solo color
+        ALWAYS_BRIGHT(0x04)      // Siempre encendido con color fijo
+    }
+    
+    /**
+     * Establece el color y efecto de luz RGB del cooler
+     * @param effect Efecto de luz a aplicar
+     * @param red Componente rojo (0-255)
+     * @param green Componente verde (0-255)
+     * @param blue Componente azul (0-255)
+     */
+    private fun setRGBLight(effect: LightEffect, red: Int = 0, green: Int = 0, blue: Int = 0) {
+        // En modo automático, usar el servicio para enviar comandos RGB
+        if (isAutoMode) {
+            val service = CoolerService.getInstance()
+            if (service != null) {
+                val serviceEffect = when (effect) {
+                    LightEffect.COLORFUL -> CoolerService.LightEffect.COLORFUL
+                    LightEffect.BREATH_FULLCOLOR -> CoolerService.LightEffect.BREATH_FULLCOLOR
+                    LightEffect.BREATH_SINGLE -> CoolerService.LightEffect.BREATH_SINGLE
+                    LightEffect.ALWAYS_BRIGHT -> CoolerService.LightEffect.ALWAYS_BRIGHT
+                }
+                service.setRGBLight(serviceEffect, red, green, blue)
+                Toast.makeText(this, "Luz RGB establecida: ${effect.name}", Toast.LENGTH_SHORT).show()
+                Log.d(TAG, "Comando RGB enviado vía servicio: ${effect.name}, R:$red G:$green B:$blue")
+            } else {
+                Toast.makeText(this, "Servicio no disponible", Toast.LENGTH_SHORT).show()
+                Log.w(TAG, "CoolerService no disponible para enviar comando RGB")
+            }
+            return
+        }
+        
+        // Modo manual: conexión directa
+        if (!isConnected || lightCharacteristic == null) {
+            val reason = if (!isConnected) "no conectado" else "característica no disponible"
+            Toast.makeText(this, "No se puede establecer luz: $reason", Toast.LENGTH_SHORT).show()
+            Log.w(TAG, "No se puede establecer luz: $reason")
+            return
+        }
+        
+        try {
+            if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
+                return
+            }
+            
+            // Formato: [modo][RR][GG][BB]
+            val command = byteArrayOf(
+                effect.code,
+                red.toByte(),
+                green.toByte(),
+                blue.toByte()
+            )
+            
+            @Suppress("DEPRECATION")
+            lightCharacteristic?.value = command
+            
+            @Suppress("DEPRECATION")
+            @SuppressLint("MissingPermission")
+            val result = bluetoothGatt?.writeCharacteristic(lightCharacteristic)
+            
+            if (result == true) {
+                val hexColor = "%02x%02x%02x%02x".format(
+                    effect.code.toInt() and 0xFF,
+                    red and 0xFF,
+                    green and 0xFF,
+                    blue and 0xFF
+                )
+                Log.d(TAG, "Comando RGB enviado: $hexColor (efecto: ${effect.name}, R:$red G:$green B:$blue)")
+                Toast.makeText(this, "Luz RGB establecida: ${effect.name}", Toast.LENGTH_SHORT).show()
+            } else {
+                Log.e(TAG, "Error enviando comando RGB")
+                Toast.makeText(this, "Error enviando comando RGB", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException en setRGBLight: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en setRGBLight: ${e.message}")
+            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    /**
+     * Atajos para efectos comunes
+     */
+    fun setColorful() = setRGBLight(LightEffect.COLORFUL)
+    
+    fun setBreathFullColor() = setRGBLight(LightEffect.BREATH_FULLCOLOR)
+    
+    fun setBreathSingleColor(red: Int, green: Int, blue: Int) = 
+        setRGBLight(LightEffect.BREATH_SINGLE, red, green, blue)
+    
+    fun setAlwaysBright(red: Int, green: Int, blue: Int) = 
+        setRGBLight(LightEffect.ALWAYS_BRIGHT, red, green, blue)
+    
+    fun turnOffLight() = setRGBLight(LightEffect.ALWAYS_BRIGHT, 0, 0, 0)
 }
 
 @Composable
@@ -771,15 +919,18 @@ fun CoolerControlScreen(
     onReadStatus: () -> Unit,
     onToggleRawMode: () -> Unit,
     onToggleAutoMode: () -> Unit,
+    onNavigateToRGB: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var fanSpeed by remember { mutableIntStateOf(50) }
+    val scrollState = rememberScrollState()
 
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(scrollState)
             .padding(16.dp),
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
@@ -848,6 +999,43 @@ fun CoolerControlScreen(
         }
         
         Spacer(modifier = Modifier.height(24.dp))
+        
+        // Botón para control RGB (funciona independientemente del modo automático)
+        if (isConnected || isAutoMode) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "🎨 Control de Iluminación RGB",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Las luces RGB son independientes del modo automático",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Button(
+                        onClick = onNavigateToRGB,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.tertiary
+                        )
+                    ) {
+                        Text("Abrir Control RGB")
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+        }
         
         // Monitor de temperatura del teléfono
         Card(
@@ -1110,7 +1298,8 @@ fun CoolerControlScreenPreview() {
             onSetFanSpeed = {},
             onReadStatus = {},
             onToggleRawMode = {},
-            onToggleAutoMode = {}
+            onToggleAutoMode = {},
+            onNavigateToRGB = {}
         )
     }
 }
