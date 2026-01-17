@@ -127,15 +127,18 @@ class MainActivity : ComponentActivity() {
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val allGranted = permissions.entries.all { it.value }
-        if (allGranted) {
-            Log.d(TAG, "Todos los permisos concedidos")
+        val granted = permissions.filter { it.value }.keys
+        val denied = permissions.filter { !it.value }.keys
+        
+        if (denied.isEmpty()) {
+            Log.d(TAG, "Todos los permisos concedidos: $granted")
             statusMessage = "Permisos concedidos, conectando..."
             connectToCooler()
         } else {
-            Log.e(TAG, "Permisos denegados: $permissions")
-            statusMessage = "Permisos necesarios denegados"
-            Toast.makeText(this, "Se requieren permisos BLE y ubicación", Toast.LENGTH_LONG).show()
+            Log.e(TAG, "Permisos DENEGADOS: $denied")
+            Log.d(TAG, "Permisos otorgados: $granted")
+            statusMessage = "Permisos denegados: ${denied.joinToString(", ") { it.substringAfterLast(".") }}"
+            Toast.makeText(this, "Se requieren todos los permisos para funcionar", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -200,9 +203,20 @@ class MainActivity : ComponentActivity() {
             connectToCooler()
         } else {
             val missing = BlePermissionManager.getMissingPermissions(this)
-            Log.d(TAG, "Solicitando permisos: $missing")
-            statusMessage = BlePermissionManager.getMissingPermissionsMessage(this)
-            requestPermissionsLauncher.launch(BlePermissionManager.getRequiredPermissions())
+            
+            // Filtrar SCHEDULE_EXACT_ALARM que no es requestable de forma normal
+            val requestable = missing.filter { it != android.Manifest.permission.SCHEDULE_EXACT_ALARM }
+            
+            if (requestable.isNotEmpty()) {
+                Log.d(TAG, "Solicitando permisos requestable: $requestable")
+                statusMessage = "Solicitando permisos..."
+                requestPermissionsLauncher.launch(requestable.toTypedArray())
+            } else if (missing.contains(android.Manifest.permission.SCHEDULE_EXACT_ALARM)) {
+                // Solo falta SCHEDULE_EXACT_ALARM, intentar conectar (es opcional para funcionamiento básico)
+                Log.w(TAG, "SCHEDULE_EXACT_ALARM no concedido, pero continuando...")
+                Toast.makeText(this, "Advertencia: Permiso de alarmas exactas no concedido. Las reconexiones pueden ser menos precisas.", Toast.LENGTH_LONG).show()
+                connectToCooler()
+            }
         }
     }
 
