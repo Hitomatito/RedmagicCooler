@@ -64,6 +64,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 @Suppress("OVERRIDE_DEPRECATION")
@@ -254,12 +255,8 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Si el servicio automático está corriendo, no conectar desde la UI
-        if (isServiceRunning(CoolerService::class.java)) {
-            Log.w(TAG, "Servicio automático corriendo, no conectar desde UI")
-            Toast.makeText(this, "Modo automático activo, usa el servicio en background", Toast.LENGTH_SHORT).show()
-            return
-        }
+        // Nota: Removida la verificación del servicio automático para permitir reconexión manual
+        // después de desactivar el modo automático
 
         try {
             // Verificar permisos antes de cualquier operación BLE
@@ -274,14 +271,18 @@ class MainActivity : ComponentActivity() {
             isConnecting = true
             statusMessage = "Buscando cooler..."
             
-            // Cerrar conexión anterior si existe
+            // Cerrar conexión anterior si existe y resetear estado
             try {
                 if (isScanning) {
                     @SuppressLint("MissingPermission")
                     bluetoothLeScanner?.stopScan(bleScanCallback)
                     isScanning = false
                 }
+                bluetoothGatt?.disconnect()
                 bluetoothGatt?.close()
+                bluetoothGatt = null
+                fanCharacteristic = null
+                lightCharacteristic = null
             } catch (e: SecurityException) {
                 Log.w(TAG, "SecurityException al cerrar: ${e.message}")
             }
@@ -756,10 +757,19 @@ class MainActivity : ComponentActivity() {
             Log.d(TAG, "Modo automático desactivado")
             Toast.makeText(this, "Modo Automático Desactivado", Toast.LENGTH_SHORT).show()
             
-            // Intentar reconectar automáticamente para control manual
-            if (BlePermissionManager.hasAllPermissions(this) && bluetoothAdapter.isEnabled && !isConnected) {
-                Log.d(TAG, "Intentando reconectar para control manual después de desactivar modo automático")
-                connectToCooler()
+            // Esperar un momento para que el servicio se detenga completamente y liberar recursos BLE
+            monitoringScope.launch {
+                delay(1000) // Esperar 1 segundo
+                
+                // Intentar reconectar automáticamente para control manual
+                if (BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && bluetoothAdapter.isEnabled && !isConnected) {
+                    Log.d(TAG, "Intentando reconectar para control manual después de desactivar modo automático")
+                    runOnUiThread {
+                        connectToCooler()
+                    }
+                } else {
+                    Log.w(TAG, "No se puede reconectar: permisosBLE=${BlePermissionManager.hasCriticalBlePermissions(this@MainActivity)}, btEnabled=${bluetoothAdapter.isEnabled}, connected=$isConnected")
+                }
             }
         }
     }
