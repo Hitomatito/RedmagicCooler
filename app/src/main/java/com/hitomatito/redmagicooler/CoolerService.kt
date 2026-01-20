@@ -25,8 +25,10 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.hitomatito.redmagicooler.model.CoolerBleConstants
+import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
 import com.hitomatito.redmagicooler.model.RGBConfig
+import com.hitomatito.redmagicooler.data.ProfileRepository
 import com.hitomatito.redmagicooler.utils.BleConnectionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,7 +62,6 @@ class CoolerService : Service() {
         private const val KEY_LAST_SPEED = "last_speed"
         private const val KEY_DEAD_OBJECT_COUNT = "dead_object_count"
         private const val KEY_DEAD_OBJECT_DATE = "dead_object_date"
-        private const val KEY_SELECTED_DEVICE_TYPE = "selected_device_type"
         private const val MAX_DEAD_OBJECT_PER_DAY = 10
         
         // Logging condicional - CAMBIAR A FALSE PARA PRODUCCIÓN
@@ -94,9 +95,8 @@ class CoolerService : Service() {
     private var lastNotificationTime = 0L
     private var reconnectBackoffMs = 2000L // Backoff inicial
     
-    // Multi-dispositivo: tipo seleccionado y dispositivos encontrados
-    private var selectedDeviceType: CoolerDeviceType? = null
-    private var scanAllTypes = false // Escanear todos los tipos o solo uno específico
+    // Perfil específico para el modo automático
+    private var activeProfile: CoolerProfile? = null
     private val discoveredDevices = CoolerDeviceList()
     private var connectedDevice: CoolerDevice? = null
     
@@ -123,8 +123,8 @@ class CoolerService : Service() {
         // thermalMonitor.startAmbientSensor()
         
         // CRÍTICO: Solo conectar si hay un perfil configurado
-        if (selectedDeviceType != null) {
-            logDebug("Perfil cargado: ${selectedDeviceType?.deviceName}, iniciando reconexión automática")
+        if (activeProfile != null) {
+            logDebug("Perfil cargado: ${activeProfile?.displayName}, iniciando reconexión automática")
             connectToCooler()
             startThermalMonitoring()
         } else {
@@ -136,24 +136,41 @@ class CoolerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_AUTO -> {
-                // Al iniciar modo automático, cargar tipo de dispositivo desde el intent
+                // Al iniciar modo automático, cargar perfil desde el intent
+                val profileId = intent.getStringExtra("PROFILE_ID")
                 val deviceTypeName = intent.getStringExtra(EXTRA_DEVICE_TYPE)
-                if (deviceTypeName != null) {
-                    selectedDeviceType = try {
+                val deviceMac = intent.getStringExtra("DEVICE_MAC")
+                val deviceName = intent.getStringExtra("DEVICE_NAME")
+
+                if (deviceTypeName != null && deviceMac != null) {
+                    val deviceType = try {
                         CoolerDeviceType.valueOf(deviceTypeName)
                     } catch (_: IllegalArgumentException) {
                         null
                     }
-                    
-                    if (selectedDeviceType != null) {
-                        logDebug("✓ Modo automático iniciado con perfil: ${selectedDeviceType?.deviceName}")
-                        
+
+                    if (deviceType != null) {
+                        // Crear perfil activo para el servicio
+                        activeProfile = CoolerProfile(
+                            id = profileId ?: "service_profile",
+                            name = deviceName ?: deviceType.deviceName,
+                            deviceType = deviceType,
+                            macAddress = deviceMac,
+                            isConnected = false,
+                            isAutoMode = true
+                        )
+
+                        logDebug("✓ Modo automático iniciado con perfil: ${activeProfile?.displayName}")
+
                         // Guardar preferencia
                         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                            .edit {
-                                putString(KEY_SELECTED_DEVICE_TYPE, selectedDeviceType?.name)
-                            }
-                        
+                            .edit()
+                            .putString("ACTIVE_PROFILE_ID", activeProfile?.id)
+                            .putString("ACTIVE_PROFILE_TYPE", activeProfile?.deviceType?.name)
+                            .putString("ACTIVE_PROFILE_MAC", activeProfile?.macAddress)
+                            .putString("ACTIVE_PROFILE_NAME", activeProfile?.name)
+                            .apply()
+
                         // Cargar configuración RGB si viene en el Intent
                         if (intent.hasExtra("RGB_EFFECT")) {
                             val effectCode = intent.getIntExtra("RGB_EFFECT", LightEffect.ALWAYS_BRIGHT.code.toInt()).toByte()
@@ -161,22 +178,22 @@ class CoolerService : Service() {
                             val red = intent.getIntExtra("RGB_RED", 0)
                             val green = intent.getIntExtra("RGB_GREEN", 0)
                             val blue = intent.getIntExtra("RGB_BLUE", 0)
-                            
+
                             // Guardar para aplicar después de conectar
                             pendingRGBConfig = RGBConfig(effect, red, green, blue)
                             logDebug("✓ Configuración RGB cargada: ${effect.name} R:$red G:$green B:$blue")
                         }
-                        
-                        // NOTA: NO llamar a connectToCooler() aquí
-                        // La conexión la hará ACTION_USE_CONNECTED_DEVICE con la MAC
-                        logDebug("✓ Esperando ACTION_USE_CONNECTED_DEVICE con MAC del dispositivo")
+
+                        // Conectar directamente al dispositivo usando su MAC
+                        logDebug("✓ Conectando al dispositivo del perfil: $deviceMac")
+                        connectDirectlyToDevice(deviceMac)
                         startThermalMonitoring()
                     } else {
                         Log.e(TAG, "❌ Tipo de dispositivo inválido recibido: $deviceTypeName")
                         updateNotification("Error: Perfil inválido", 0, 0f)
                     }
                 } else {
-                    Log.e(TAG, "❌ No se recibió tipo de dispositivo en ACTION_START_AUTO")
+                    Log.e(TAG, "❌ Información de perfil incompleta en ACTION_START_AUTO")
                     updateNotification("Error: Sin perfil", 0, 0f)
                 }
             }
@@ -197,38 +214,57 @@ class CoolerService : Service() {
                 }
             }
             ACTION_SET_DEVICE_TYPE -> {
-                // Cambiar tipo de dispositivo y reiniciar escaneo
+                // Cambiar perfil activo
+                val profileId = intent.getStringExtra("PROFILE_ID")
                 val deviceTypeName = intent.getStringExtra(EXTRA_DEVICE_TYPE)
-                selectedDeviceType = deviceTypeName?.let { 
-                    CoolerDeviceType.fromDeviceName(it) 
-                }
-                scanAllTypes = intent.getBooleanExtra(EXTRA_SCAN_ALL, false)
-                
-                logDebug("✓ Tipo de dispositivo configurado: ${selectedDeviceType?.deviceName ?: "Todos"}")
-                
-                // Guardar preferencia
-                selectedDeviceType?.let { type ->
-                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                        .edit {
-                            putString(KEY_SELECTED_DEVICE_TYPE, type.name)
-                        }
-                }
-                
-                // Reiniciar escaneo con nuevo tipo
-                if (isScanning) {
-                    try {
-                        @SuppressLint("MissingPermission")
-                        bluetoothLeScanner?.stopScan(scanCallback)
-                        isScanning = false
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error deteniendo escaneo previo: ${e.message}")
+                val deviceMac = intent.getStringExtra("DEVICE_MAC")
+                val deviceName = intent.getStringExtra("DEVICE_NAME")
+
+                if (deviceTypeName != null && deviceMac != null) {
+                    val deviceType = try {
+                        CoolerDeviceType.valueOf(deviceTypeName)
+                    } catch (_: IllegalArgumentException) {
+                        null
                     }
-                }
-                
-                // Solo iniciar conexión si hay perfil configurado
-                if (selectedDeviceType != null) {
-                    connectToCooler()
-                    startThermalMonitoring()
+
+                    if (deviceType != null) {
+                        activeProfile = CoolerProfile(
+                            id = profileId ?: "service_profile",
+                            name = deviceName ?: deviceType.deviceName,
+                            deviceType = deviceType,
+                            macAddress = deviceMac,
+                            isConnected = false,
+                            isAutoMode = true
+                        )
+
+                        logDebug("✓ Perfil activo configurado: ${activeProfile?.displayName}")
+
+                        // Guardar preferencia
+                        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                            .edit {
+                                putString("ACTIVE_PROFILE_ID", activeProfile?.id)
+                                putString("ACTIVE_PROFILE_TYPE", activeProfile?.deviceType?.name)
+                                putString("ACTIVE_PROFILE_MAC", activeProfile?.macAddress)
+                                putString("ACTIVE_PROFILE_NAME", activeProfile?.name)
+                            }
+
+                        // Reiniciar escaneo con nuevo perfil
+                        if (isScanning) {
+                            try {
+                                @SuppressLint("MissingPermission")
+                                bluetoothLeScanner?.stopScan(scanCallback)
+                                isScanning = false
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error deteniendo escaneo previo: ${e.message}")
+                            }
+                        }
+
+                        // Solo iniciar conexión si hay perfil configurado
+                        if (activeProfile != null) {
+                            connectToCooler()
+                            startThermalMonitoring()
+                        }
+                    }
                 }
             }
         }
@@ -400,8 +436,8 @@ class CoolerService : Service() {
     }
     
     private fun connectToCooler() {
-        // CRÍTICO: Verificar que se haya configurado un tipo de dispositivo
-        if (selectedDeviceType == null) {
+        // CRÍTICO: Verificar que se haya configurado un perfil
+        if (activeProfile == null) {
             Log.e(TAG, "❌ connectToCooler() llamado sin perfil configurado - Abortando")
             updateNotification("Esperando configuración...", 0, 0f)
             return
@@ -435,7 +471,7 @@ class CoolerService : Service() {
             
             // CRÍTICO: Escanear SIN filtro de UUID para asegurar detección
             // El filtro de UUID puede causar problemas después de desconexiones
-            Log.d(TAG, "🔍 Iniciando escaneo SIN filtro para ${selectedDeviceType?.deviceName ?: "todos"}")
+            Log.d(TAG, "🔍 Iniciando escaneo SIN filtro para ${activeProfile?.displayName ?: "todos"}")
             
             val scanSettings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
@@ -492,6 +528,12 @@ class CoolerService : Service() {
                     reconnectBackoffMs = 2000L // Resetear backoff
                     Log.d(TAG, "Conectado al cooler")
                     
+                    // Actualizar estado del perfil en el repositorio
+                    activeProfile?.let { profile ->
+                        ProfileRepository.getInstance(this@CoolerService).updateConnectionState(profile.id, true)
+                        Log.d(TAG, "✓ Estado del perfil actualizado: Conectado")
+                    }
+                    
                     try {
                         @SuppressLint("MissingPermission")
                         if (BlePermissionManager.hasBluetoothConnectPermission(this@CoolerService)) {
@@ -506,6 +548,12 @@ class CoolerService : Service() {
                     isConnected = false
                     Log.d(TAG, "Desconectado del cooler, status: $status")
                     updateNotification("Desconectado", 0, currentTemp)
+                    
+                    // Actualizar estado del perfil en el repositorio
+                    activeProfile?.let { profile ->
+                        ProfileRepository.getInstance(this@CoolerService).updateConnectionState(profile.id, false)
+                        Log.d(TAG, "✓ Estado del perfil actualizado: Desconectado")
+                    }
                     
                     // Diferenciar tipos de desconexión
                     val isIntentionalDisconnect = status == BluetoothGatt.GATT_SUCCESS
@@ -744,11 +792,17 @@ class CoolerService : Service() {
                 discoveredDevices.addOrUpdate(coolerDevice)
                 Log.d(TAG, "Dispositivo cooler agregado: ${coolerDevice.displayName} - ${coolerDevice.deviceType.deviceName}")
                 
-                // Si no estamos en modo escaneo múltiple, conectar automáticamente al primero encontrado
-                if (!scanAllTypes) {
-                    isScanning = false
+                // Verificar si este dispositivo coincide con el perfil activo
+                val matchesProfile = activeProfile?.let { profile ->
+                    device.address.equals(profile.macAddress, ignoreCase = true) &&
+                    detectedType == profile.deviceType
+                } ?: false
+                
+                if (matchesProfile) {
+                    Log.d(TAG, "✅ Dispositivo coincide con perfil activo: ${coolerDevice.displayName}")
                     
-                    // Detener escaneo una vez encontrado el dispositivo
+                    // Detener escaneo
+                    isScanning = false
                     try {
                         bluetoothLeScanner?.stopScan(this)
                     } catch (e: SecurityException) {
@@ -766,6 +820,8 @@ class CoolerService : Service() {
                         gattCallback,
                         BluetoothDevice.TRANSPORT_LE
                     )
+                } else {
+                    Log.d(TAG, "Dispositivo no coincide con perfil activo: ${coolerDevice.displayName} (esperado: ${activeProfile?.macAddress})")
                 }
             } else {
                 Log.d(TAG, "Dispositivo no identificado como cooler: $deviceName")
@@ -880,9 +936,24 @@ class CoolerService : Service() {
             prefs.edit().apply {
                 putFloat(KEY_LAST_TEMP, currentTemp)
                 putInt(KEY_LAST_SPEED, currentSpeed)
+                
+                // Guardar perfil activo
+                activeProfile?.let { profile ->
+                    putString("ACTIVE_PROFILE_ID", profile.id)
+                    putString("ACTIVE_PROFILE_TYPE", profile.deviceType.name)
+                    putString("ACTIVE_PROFILE_MAC", profile.macAddress)
+                    putString("ACTIVE_PROFILE_NAME", profile.name)
+                } ?: run {
+                    // Limpiar si no hay perfil activo
+                    remove("ACTIVE_PROFILE_ID")
+                    remove("ACTIVE_PROFILE_TYPE")
+                    remove("ACTIVE_PROFILE_MAC")
+                    remove("ACTIVE_PROFILE_NAME")
+                }
+                
                 apply()
             }
-            Log.d(TAG, "Estado guardado: temp=$currentTemp, speed=$currentSpeed")
+            Log.d(TAG, "Estado guardado: temp=$currentTemp, speed=$currentSpeed, profile=${activeProfile?.displayName ?: "ninguno"}")
         } catch (e: Exception) {
             Log.e(TAG, "Error guardando estado: ${e.message}")
         }
@@ -893,18 +964,33 @@ class CoolerService : Service() {
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             currentTemp = prefs.getFloat(KEY_LAST_TEMP, 0f)
             currentSpeed = prefs.getInt(KEY_LAST_SPEED, 0)
-            
-            // Cargar tipo de dispositivo seleccionado
-            val deviceTypeName = prefs.getString(KEY_SELECTED_DEVICE_TYPE, null)
-            selectedDeviceType = deviceTypeName?.let { 
-                try {
-                    CoolerDeviceType.valueOf(it)
+
+            // Cargar perfil activo
+            val profileId = prefs.getString("ACTIVE_PROFILE_ID", null)
+            val deviceTypeName = prefs.getString("ACTIVE_PROFILE_TYPE", null)
+            val deviceMac = prefs.getString("ACTIVE_PROFILE_MAC", null)
+            val deviceName = prefs.getString("ACTIVE_PROFILE_NAME", null)
+
+            if (deviceTypeName != null && deviceMac != null) {
+                val deviceType = try {
+                    CoolerDeviceType.valueOf(deviceTypeName)
                 } catch (_: IllegalArgumentException) {
                     null
                 }
+
+                if (deviceType != null) {
+                    activeProfile = CoolerProfile(
+                        id = profileId ?: "service_profile",
+                        name = deviceName ?: deviceType.deviceName,
+                        deviceType = deviceType,
+                        macAddress = deviceMac,
+                        isConnected = false,
+                        isAutoMode = true
+                    )
+                }
             }
-            
-            Log.d(TAG, "Estado restaurado: temp=$currentTemp, speed=$currentSpeed, type=${selectedDeviceType?.deviceName ?: "ninguno"}")
+
+            Log.d(TAG, "Estado restaurado: temp=$currentTemp, speed=$currentSpeed, profile=${activeProfile?.displayName ?: "ninguno"}")
         } catch (e: Exception) {
             Log.e(TAG, "Error cargando estado: ${e.message}")
         }
