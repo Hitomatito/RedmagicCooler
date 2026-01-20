@@ -8,6 +8,7 @@
     <!-- Permisos Bluetooth para Android 12+ (API >= 31) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     
     <!-- Permisos de ubicación necesarios para BLE en Android 11 y anteriores -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

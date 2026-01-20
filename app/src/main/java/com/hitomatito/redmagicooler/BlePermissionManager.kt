@@ -24,6 +24,7 @@ object BlePermissionManager {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
         }
         
         // Agregar permiso de notificaciones para Android 13+ (API 33+)
@@ -62,6 +63,7 @@ object BlePermissionManager {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             critical.add(Manifest.permission.BLUETOOTH_CONNECT)
             critical.add(Manifest.permission.BLUETOOTH_SCAN)
+            critical.add(Manifest.permission.BLUETOOTH_ADVERTISE)
         }
         
         return critical.all { permission ->
