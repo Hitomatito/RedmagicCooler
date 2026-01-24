@@ -128,7 +128,7 @@ class CoolerService : Service() {
             connectToCooler()
             startThermalMonitoring()
         } else {
-            logDebug("❌ No hay perfil configurado, esperando configuración desde MainActivity")
+            logDebug("No hay perfil configurado, esperando configuracion desde MainActivity")
             updateNotification("Esperando configuración...", 0, 0f)
         }
     }
@@ -160,7 +160,7 @@ class CoolerService : Service() {
                             isAutoMode = true
                         )
 
-                        logDebug("✓ Modo automático iniciado con perfil: ${activeProfile?.displayName}")
+                        logDebug("Modo automatico iniciado con perfil: ${activeProfile?.displayName}")
 
                         // Guardar preferencia
                         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -181,19 +181,19 @@ class CoolerService : Service() {
 
                             // Guardar para aplicar después de conectar
                             pendingRGBConfig = RGBConfig(effect, red, green, blue)
-                            logDebug("✓ Configuración RGB cargada: ${effect.name} R:$red G:$green B:$blue")
+                            logDebug("Configuracion RGB cargada: ${effect.name} R:$red G:$green B:$blue")
                         }
 
                         // Conectar directamente al dispositivo usando su MAC
-                        logDebug("✓ Conectando al dispositivo del perfil: $deviceMac")
+                        logDebug("Conectando al dispositivo del perfil: $deviceMac")
                         connectDirectlyToDevice(deviceMac)
                         startThermalMonitoring()
                     } else {
-                        Log.e(TAG, "❌ Tipo de dispositivo inválido recibido: $deviceTypeName")
+                        Log.e(TAG, "Tipo de dispositivo invalido recibido: $deviceTypeName")
                         updateNotification("Error: Perfil inválido", 0, 0f)
                     }
                 } else {
-                    Log.e(TAG, "❌ Información de perfil incompleta en ACTION_START_AUTO")
+                    Log.e(TAG, "Informacion de perfil incompleta en ACTION_START_AUTO")
                     updateNotification("Error: Sin perfil", 0, 0f)
                 }
             }
@@ -207,10 +207,10 @@ class CoolerService : Service() {
                 // Conectar directamente usando la MAC del dispositivo ya conectado
                 val deviceMac = intent.getStringExtra("DEVICE_MAC")
                 if (deviceMac != null) {
-                    Log.d(TAG, "✓ Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
+                    Log.d(TAG, "Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
                     connectDirectlyToDevice(deviceMac)
                 } else {
-                    Log.e(TAG, "❌ No se recibió MAC del dispositivo")
+                    Log.e(TAG, "No se recibio MAC del dispositivo")
                 }
             }
             ACTION_SET_DEVICE_TYPE -> {
@@ -237,7 +237,7 @@ class CoolerService : Service() {
                             isAutoMode = true
                         )
 
-                        logDebug("✓ Perfil activo configurado: ${activeProfile?.displayName}")
+                        logDebug("Perfil activo configurado: ${activeProfile?.displayName}")
 
                         // Guardar preferencia
                         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -405,7 +405,7 @@ class CoolerService : Service() {
                 return
             }
             
-            Log.d(TAG, "⚡ Conectando directamente a: $macAddress")
+            Log.d(TAG, "Conectando directamente a: $macAddress")
             updateNotification("Conectando...", 0, 0f)
             
             // CRÍTICO: Cerrar GATT anterior si existe
@@ -438,7 +438,7 @@ class CoolerService : Service() {
     private fun connectToCooler() {
         // CRÍTICO: Verificar que se haya configurado un perfil
         if (activeProfile == null) {
-            Log.e(TAG, "❌ connectToCooler() llamado sin perfil configurado - Abortando")
+            Log.e(TAG, "connectToCooler() llamado sin perfil configurado - Abortando")
             updateNotification("Esperando configuración...", 0, 0f)
             return
         }
@@ -471,7 +471,7 @@ class CoolerService : Service() {
             
             // CRÍTICO: Escanear SIN filtro de UUID para asegurar detección
             // El filtro de UUID puede causar problemas después de desconexiones
-            Log.d(TAG, "🔍 Iniciando escaneo SIN filtro para ${activeProfile?.displayName ?: "todos"}")
+            Log.d(TAG, "Iniciando escaneo SIN filtro para ${activeProfile?.displayName ?: "todos"}")
             
             val scanSettings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
@@ -531,7 +531,7 @@ class CoolerService : Service() {
                     // Actualizar estado del perfil en el repositorio
                     activeProfile?.let { profile ->
                         ProfileRepository.getInstance(this@CoolerService).updateConnectionState(profile.id, true)
-                        Log.d(TAG, "✓ Estado del perfil actualizado: Conectado")
+                        Log.d(TAG, "Estado del perfil actualizado: Conectado")
                     }
                     
                     try {
@@ -552,7 +552,7 @@ class CoolerService : Service() {
                     // Actualizar estado del perfil en el repositorio
                     activeProfile?.let { profile ->
                         ProfileRepository.getInstance(this@CoolerService).updateConnectionState(profile.id, false)
-                        Log.d(TAG, "✓ Estado del perfil actualizado: Desconectado")
+                        Log.d(TAG, "Estado del perfil actualizado: Desconectado")
                     }
                     
                     // Diferenciar tipos de desconexión
@@ -684,7 +684,7 @@ class CoolerService : Service() {
                     // Mostrar información del perfil activo
                     connectedDevice?.let { device ->
                         Log.i(TAG, "═══════════════════════════════════════════════")
-                        Log.i(TAG, "✓ PERFIL ACTIVO: ${device.deviceType.deviceName}")
+                        Log.i(TAG, "PERFIL ACTIVO: ${device.deviceType.deviceName}")
                         Log.i(TAG, "  Generación: ${device.deviceType.generation}")
                         Log.i(TAG, "  UUID: ${device.deviceType.advertisingUUID}")
                         Log.i(TAG, "  Señal: ${device.signalQuality}% (${device.rssi} dBm)")
@@ -699,7 +699,7 @@ class CoolerService : Service() {
                         serviceScope.launch {
                             delay(1000) // Esperar 1 segundo para que la conexión se estabilice
                             setRGBLight(config.effect, config.red, config.green, config.blue)
-                            Log.i(TAG, "✓ Configuración RGB aplicada: ${config.effect.name} R:${config.red} G:${config.green} B:${config.blue}")
+                            Log.i(TAG, "Configuracion RGB aplicada: ${config.effect.name} R:${config.red} G:${config.green} B:${config.blue}")
                             pendingRGBConfig = null // Limpiar después de aplicar
                         }
                     }
@@ -870,7 +870,7 @@ class CoolerService : Service() {
                     ThermalMonitor.TempLevel.SAFE -> "Normal"
                     ThermalMonitor.TempLevel.WARM -> "Tibio"
                     ThermalMonitor.TempLevel.HOT -> "Caliente"
-                    ThermalMonitor.TempLevel.CRITICAL -> "⚠️ Crítico"
+                    ThermalMonitor.TempLevel.CRITICAL -> "Critico"
                 }
                 
                 updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)

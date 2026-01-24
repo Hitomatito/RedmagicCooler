@@ -16,7 +16,7 @@ El Red Magic Cooler 5 Pro es un enfriador magnético premium diseñado para disp
 
 Esta aplicación está optimizada específicamente para aprovechar todas las capacidades del Red Magic Cooler 5 Pro.
 
-## �🚀 Características Principales
+## Caracteristicas Principales
 
 ### Control de Ventilador
 - **Control Manual**: Ajuste preciso de la velocidad del ventilador silencioso de 7 aspas (0-100%)
@@ -115,7 +115,7 @@ Esta aplicación está optimizada específicamente para aprovechar todas las cap
 - Se reinicia automáticamente tras reinicios del sistema
 - Monitorea el uso de batería del servicio
 
-## 🔧 Configuración Avanzada
+## Configuracion Avanzada
 
 ### Umbrales de Temperatura
 - **Baja** (< 35°C): Velocidad mínima (20%)

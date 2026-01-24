@@ -200,9 +200,9 @@ private fun ProfileCard(
                     // Indicador de conexión
                     Text(
                         text = when (profile.statusColor) {
-                            ProfileStatus.CONNECTED -> "🟢"
-                            ProfileStatus.CONNECTING -> "🟡"
-                            ProfileStatus.DISCONNECTED -> "⚫"
+                            ProfileStatus.CONNECTED -> "●"
+                            ProfileStatus.CONNECTING -> "●"
+                            ProfileStatus.DISCONNECTED -> "○"
                         },
                         style = MaterialTheme.typography.labelSmall
                     )
@@ -222,7 +222,7 @@ private fun ProfileCard(
             // Indicador RGB si está configurado
             if (profile.rgbConfig != null && profile.isConnected) {
                 Text(
-                    text = "🎨",
+                    text = "RGB",
                     style = MaterialTheme.typography.titleLarge
                 )
             }
@@ -248,7 +248,7 @@ private fun ProfileCard(
             ) {
                 if (profile.isAutoMode) {
                     Text(
-                        text = "✓ Modo Automático",
+                        text = "Modo Automatico",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -356,7 +356,7 @@ private fun EmptyStateContent(
                 
                 // Texto de ayuda
                 Text(
-                    text = "💡 Asegúrate de que tu cooler esté encendido y cerca del teléfono",
+                    text = "Asegurate de que tu cooler este encendido y cerca del telefono",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                 )

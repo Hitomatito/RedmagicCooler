@@ -144,7 +144,7 @@ enum class CoolerDeviceType(
             1, 2 -> "🌀" // Generaciones antiguas
             3, 4 -> "❄️" // Generaciones intermedias
             5, 6 -> "🔷" // Generaciones modernas
-            else -> "📱"
+            else -> "Dispositivo"
         }
     }
 }

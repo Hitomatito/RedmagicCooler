@@ -289,7 +289,7 @@ private fun HelpCard() {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "💡 Consejos",
+                text = "Consejos",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )

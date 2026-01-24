@@ -64,7 +64,7 @@ fun DeviceTypeSelectorDialog(
                 
                 // Opción para escanear todos los tipos
                 DeviceTypeOption(
-                    icon = "🔍",
+                    icon = "Buscar",
                     title = "Escanear Todos",
                     description = "Buscar todos los modelos disponibles",
                     isSelected = currentSelection == null,
@@ -180,7 +180,7 @@ private fun DeviceTypeOption(
             // Indicador de selección
             if (isSelected) {
                 Text(
-                    text = "✓",
+                    text = "Seleccionado",
                     style = MaterialTheme.typography.headlineSmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(start = 8.dp)
