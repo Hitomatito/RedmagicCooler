@@ -1074,22 +1074,41 @@ class MainActivity : ComponentActivity() {
             }
             
         } else {
+            // Desactivar modo automático
             if (isServiceRunning(CoolerService::class.java)) {
-                val stopIntent = Intent(this, CoolerService::class.java).apply {
-                    action = CoolerService.ACTION_STOP_AUTO
+                // En lugar de detener el servicio completamente, cambiar a modo manual
+                // Esto mantiene la conexión activa y solo desactiva el ajuste automático
+                val manualIntent = Intent(this, CoolerService::class.java).apply {
+                    action = CoolerService.ACTION_SWITCH_TO_MANUAL
                 }
-                stopService(stopIntent)
-            }
-            
-            Toast.makeText(this, "Modo Automático Desactivado", Toast.LENGTH_SHORT).show()
-            
-            val profile = profileRepository.getProfile(profileId)
-            monitoringScope.launch {
-                delay(1000)
-                if (profile != null && BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && 
-                    bluetoothAdapter.isEnabled && !isConnected) {
-                    runOnUiThread {
-                        connectToProfile(profile)
+                startService(manualIntent)
+                
+                Toast.makeText(this, "Cambiando a Modo Manual...", Toast.LENGTH_SHORT).show()
+                
+                // Esperar a que el servicio se detenga y reconectar desde MainActivity
+                val profile = profileRepository.getProfile(profileId)
+                monitoringScope.launch {
+                    delay(3000) // Dar tiempo para que el servicio cambie a manual y se detenga
+                    if (profile != null && BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && 
+                        bluetoothAdapter.isEnabled && !isConnected) {
+                        runOnUiThread {
+                            Log.d(TAG, "Reconectando en modo manual desde MainActivity")
+                            connectToProfile(profile)
+                        }
+                    }
+                }
+            } else {
+                Toast.makeText(this, "Modo Automático Desactivado", Toast.LENGTH_SHORT).show()
+                
+                // Si no hay servicio activo, simplemente reconectar
+                val profile = profileRepository.getProfile(profileId)
+                monitoringScope.launch {
+                    delay(1000)
+                    if (profile != null && BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && 
+                        bluetoothAdapter.isEnabled && !isConnected) {
+                        runOnUiThread {
+                            connectToProfile(profile)
+                        }
                     }
                 }
             }

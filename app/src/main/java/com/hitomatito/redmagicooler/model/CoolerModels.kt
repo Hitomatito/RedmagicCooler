@@ -46,6 +46,7 @@ object CoolerBleConstants {
     val FAN_SPEED_CHARACTERISTIC_UUID: UUID = UUID.fromString("00001012-0000-1000-8000-00805f9b34fb")
     val TEMPERATURE_NOTIFICATION_UUID: UUID = UUID.fromString("00001015-0000-1000-8000-00805f9b34fb")
     val LIGHT_CONTROL_UUID: UUID = UUID.fromString("00001013-0000-1000-8000-00805f9b34fb")
+    val AUTO_MODE_CONTROL_UUID: UUID = UUID.fromString("00001018-0000-1000-8000-00805f9b34fb")
     
     // Conversión de velocidad: 0-100% → 40-200 raw value
     const val MIN_RAW_VALUE = 40
@@ -66,4 +67,9 @@ object CoolerBleConstants {
         val clamped = raw.coerceIn(MIN_RAW_VALUE, MAX_RAW_VALUE)
         return ((clamped - MIN_RAW_VALUE) * 100) / (MAX_RAW_VALUE - MIN_RAW_VALUE)
     }
+    
+    // Comandos para control de modo automático
+    // Según el logcat de la app original: writeAutoOn y writeAutoOff ambos escriben 0x00
+    // La característica 0x1018 controla el modo automático
+    const val AUTO_MODE_COMMAND: Byte = 0x00
 }
