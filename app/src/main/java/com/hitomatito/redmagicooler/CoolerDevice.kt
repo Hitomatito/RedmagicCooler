@@ -69,7 +69,7 @@ data class CoolerDevice(
         get() = when {
             rssi >= -50 -> "📶" // Excelente
             rssi >= -70 -> "📶" // Buena
-            rssi >= -85 -> "📡" // Regular
+            rssi >= -85 -> "Regular" // Regular
             else -> "📉" // Débil
         }
     

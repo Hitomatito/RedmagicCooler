@@ -211,7 +211,7 @@ fun ProfileConfigScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "🎨 Control de Iluminación RGB",
+                            text = "Control de Iluminación RGB",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -273,10 +273,10 @@ private fun ConnectionCard(
 ) {
     val isInAutoMode = profile.isAutoMode
     val displayStatus = when {
-        isInAutoMode && profile.isConnected -> "🟢 Modo Automático Activo"
-        isInAutoMode && !profile.isConnected -> "🟡 Modo Automático (Reconectando...)"
-        profile.isConnected -> "🟢 Conectado (Manual)"
-        else -> "⚫ Desconectado"
+        isInAutoMode && profile.isConnected -> "Modo Automatico Activo"
+        isInAutoMode && !profile.isConnected -> "Modo Automatico (Reconectando...)"
+        profile.isConnected -> "Conectado (Manual)"
+        else -> "Desconectado"
     }
     val statusColor = when {
         isInAutoMode -> MaterialTheme.colorScheme.tertiaryContainer
@@ -304,10 +304,10 @@ private fun ConnectionCard(
                 ) {
                     Text(
                         text = when {
-                            isInAutoMode && profile.isConnected -> "🟢"
-                            isInAutoMode -> "🟡"
-                            profile.isConnected -> "🟢"
-                            else -> "⚫"
+                            isInAutoMode && profile.isConnected -> "●"
+                            isInAutoMode -> "●"
+                            profile.isConnected -> "●"
+                            else -> "○"
                         },
                         style = MaterialTheme.typography.titleLarge
                     )
@@ -336,7 +336,7 @@ private fun ConnectionCard(
             if (isInAutoMode) {
                 // En modo automático, no mostrar botones de conexión manual
                 Text(
-                    text = "⚡",
+                    text = "AUTO",
                     style = MaterialTheme.typography.headlineMedium
                 )
             } else if (profile.isConnected) {
@@ -387,7 +387,7 @@ private fun ThermalCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "🌡️ Monitor Térmico",
+                    text = "Monitor Termico",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -423,7 +423,7 @@ private fun ThermalCard(
                             ThermalMonitor.TempLevel.SAFE -> "Normal"
                             ThermalMonitor.TempLevel.WARM -> "Calentamiento"
                             ThermalMonitor.TempLevel.HOT -> "Alta"
-                            ThermalMonitor.TempLevel.CRITICAL -> "⚠️ Crítica"
+                            ThermalMonitor.TempLevel.CRITICAL -> "Critica"
                         },
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -441,7 +441,7 @@ private fun ThermalCard(
             if (isAutoMode) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "✓ Ajuste automático activo",
+                    text = "Ajuste automatico activo",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -515,7 +515,7 @@ private fun SpeedControlCard(
             
             // Botones rápidos
             Text(
-                text = "🎯 Velocidades Preestablecidas",
+                text = "Velocidades Preestablecidas",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )

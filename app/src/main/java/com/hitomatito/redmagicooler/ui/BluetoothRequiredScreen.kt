@@ -115,7 +115,7 @@ fun BluetoothRequiredScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "💡 ¿Por qué es necesario?",
+                    text = "Por que es necesario?",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )

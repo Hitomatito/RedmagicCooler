@@ -136,11 +136,11 @@ fun RGBControlScreen(
                     // Indicador de efecto seleccionado
                     if (selectedEffect != null) {
                         val effectName = when (selectedEffect) {
-                            "rainbow" -> "🌈 Arcoíris"
-                            "multiBreathing" -> "💨 Respiración Multi"
-                            "singleBreathing" -> "💨 Respiración Simple"
-                            "fixed" -> "💡 Fijo"
-                            "off" -> "⚫ Apagar"
+                            "rainbow" -> "Arcoiris"
+                            "multiBreathing" -> "Respiracion Multi"
+                            "singleBreathing" -> "Respiracion Simple"
+                            "fixed" -> "Fijo"
+                            "off" -> "Apagar"
                             else -> ""
                         }
                         Text(
@@ -182,7 +182,7 @@ fun RGBControlScreen(
                         )
                     ) {
                         Column(horizontalAlignment = Alignment.Start) {
-                            Text("💨 Respiracion Multi", fontWeight = FontWeight.Bold)
+                            Text("Respiracion Multi", fontWeight = FontWeight.Bold)
                             Text("Respiracion multicolor", style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -197,7 +197,7 @@ fun RGBControlScreen(
                         )
                     ) {
                         Column(horizontalAlignment = Alignment.Start) {
-                            Text("💨 Respiracion Simple", fontWeight = FontWeight.Bold)
+                            Text("Respiracion Simple", fontWeight = FontWeight.Bold)
                             Text("Respiracion 1 color", style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -212,7 +212,7 @@ fun RGBControlScreen(
                         )
                     ) {
                         Column(horizontalAlignment = Alignment.Start) {
-                            Text("💡 Fijo", fontWeight = FontWeight.Bold)
+                            Text("Fijo", fontWeight = FontWeight.Bold)
                             Text("Luz constante", style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -247,7 +247,7 @@ fun RGBControlScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Text(
-                            text = "🎨 Seleccionar Color",
+                            text = "Seleccionar Color",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
