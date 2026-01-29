@@ -76,7 +76,7 @@ class MainActivity : ComponentActivity() {
     private var pendingNewDeviceType by mutableStateOf<CoolerDeviceType?>(null)
     private var pendingDeviceMac by mutableStateOf<String?>(null)
     private var pendingDeviceName by mutableStateOf<String?>(null)
-    private var pendingDeviceRssi by mutableStateOf(0)
+    private var pendingDeviceRssi by mutableIntStateOf(0)
     
     // Perfil recién creado (para navegación automática)
     private var newlyCreatedProfileId by mutableStateOf<String?>(null)
@@ -124,6 +124,36 @@ class MainActivity : ComponentActivity() {
         }
         return false
     }
+    
+    /**
+     * Verifica y limpia estados inconsistentes del servicio
+     * Si el servicio no está corriendo pero hay perfiles en modo auto, los limpia
+     */
+    private fun verifyAndCleanServiceState() {
+        val isServiceRunning = isServiceRunning(CoolerService::class.java)
+        
+        if (!isServiceRunning) {
+            // Si el servicio no está corriendo, verificar si hay perfiles en modo auto
+            val profiles = profileRepository.profiles.value
+            var cleanedCount = 0
+            
+            profiles.forEach { profile ->
+                if (profile.isAutoMode) {
+                    Log.w(TAG, "Estado inconsistente detectado: Perfil ${profile.displayName} en modo auto pero servicio no está corriendo")
+                    // Limpiar estado
+                    profileRepository.updateAutoMode(profile.id, false)
+                    profileRepository.updateConnectionState(profile.id, false)
+                    cleanedCount++
+                }
+            }
+            
+            if (cleanedCount > 0) {
+                Log.i(TAG, "Se limpiaron $cleanedCount perfiles con estados inconsistentes")
+            }
+        } else {
+            Log.d(TAG, "Servicio de cooler está corriendo correctamente")
+        }
+    }
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -161,6 +191,9 @@ class MainActivity : ComponentActivity() {
 
         // Inicializar repositorio de perfiles
         profileRepository = ProfileRepository.getInstance(this)
+        
+        // Verificar y limpiar estados inconsistentes del servicio
+        verifyAndCleanServiceState()
 
         // Inicializar Bluetooth
         val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager
@@ -172,16 +205,12 @@ class MainActivity : ComponentActivity() {
         }
         
         bluetoothAdapter = bluetoothManager.adapter
-        if (!bluetoothAdapter.isEnabled) {
-            showBluetoothRequired = true
-        } else {
-            showBluetoothRequired = false
-        }
+        showBluetoothRequired = !bluetoothAdapter.isEnabled
         
         // Solicitar permisos al inicio
         if (!BlePermissionManager.hasAllPermissions(this)) {
             val missing = BlePermissionManager.getMissingPermissions(this)
-            val requestable = missing.filter { it != android.Manifest.permission.SCHEDULE_EXACT_ALARM }
+            val requestable = missing.filter { it != "android.permission.SCHEDULE_EXACT_ALARM" }
             if (requestable.isNotEmpty()) {
                 requestPermissionsLauncher.launch(requestable.toTypedArray())
             }
@@ -404,7 +433,7 @@ class MainActivity : ComponentActivity() {
             Log.w(TAG, "Faltan permisos BLE criticos")
             val missing = BlePermissionManager.getMissingPermissions(this)
             Log.d(TAG, "Permisos faltantes: ${missing.joinToString()}")
-            val requestable = missing.filter { it != android.Manifest.permission.SCHEDULE_EXACT_ALARM }
+            val requestable = missing.filter { it != "android.permission.SCHEDULE_EXACT_ALARM" }
             if (requestable.isNotEmpty()) {
                 requestPermissionsLauncher.launch(requestable.toTypedArray())
             }
@@ -679,7 +708,7 @@ class MainActivity : ComponentActivity() {
                         isConnected = false
                         
                         // Si estamos en medio de un reintento de discovery, no procesardesconexión
-                        if (discoveryRetryCount > 0 && discoveryRetryCount < maxDiscoveryRetries) {
+                        if (discoveryRetryCount in 1..<maxDiscoveryRetries) {
                             Log.w(TAG, "Desconexión durante reintento de discovery (intento $discoveryRetryCount), ignorando...")
                             return@runOnUiThread
                         }
@@ -1093,7 +1122,11 @@ class MainActivity : ComponentActivity() {
                         bluetoothAdapter.isEnabled && !isConnected) {
                         runOnUiThread {
                             Log.d(TAG, "Reconectando en modo manual desde MainActivity")
-                            connectToProfile(profile)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                connectToProfile(profile)
+                            } else {
+                                Log.w(TAG, "API level insuficiente para reconectar automáticamente")
+                            }
                         }
                     }
                 }
@@ -1107,7 +1140,11 @@ class MainActivity : ComponentActivity() {
                     if (profile != null && BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && 
                         bluetoothAdapter.isEnabled && !isConnected) {
                         runOnUiThread {
-                            connectToProfile(profile)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                connectToProfile(profile)
+                            } else {
+                                Log.w(TAG, "API level insuficiente para reconectar automáticamente")
+                            }
                         }
                     }
                 }
