@@ -44,6 +44,11 @@ class ThermalMonitor(private val context: Context) {
         
         // Umbral de estabilidad para evitar cambios frecuentes
         private const val MIN_SPEED_CHANGE = 10  // Cambio mínimo de velocidad: 10%
+        
+        // Sistema de rampa progresiva
+        private const val SPEED_INCREMENT = 15   // Incremento de velocidad por paso: 15%
+        private const val MIN_TIME_AT_SPEED = 30000L  // Tiempo mínimo en cada velocidad: 30 segundos
+        private const val PROGRESSIVE_INCREASE_DELAY = 20000L // Espera entre incrementos: 20 segundos
     }
     
     // Intervalo configurable de actualización (en ms)
@@ -62,6 +67,11 @@ class ThermalMonitor(private val context: Context) {
     // Variables para estabilidad
     private var lastRecommendedSpeed: Int = 0
     private var speedChangeCounter: Int = 0
+    
+    // Sistema de velocidad progresiva
+    private var currentTargetSpeed: Int = 0
+    private var lastSpeedIncreaseTime: Long = 0L
+    private var timeAtCurrentSpeed: Long = 0L
     
     // Contador de intervalos de actualización
     private var intervalCounter: Int = 0
@@ -329,7 +339,7 @@ class ThermalMonitor(private val context: Context) {
     
     /**
      * Calcula la velocidad recomendada del cooler según la temperatura
-     * Con estabilización para evitar cambios frecuentes
+     * Con sistema de rampa progresiva y estabilización
      * 
      * Lógica de calibración:
      * - < 40°C: 0% (apagado, no necesario)
@@ -337,9 +347,17 @@ class ThermalMonitor(private val context: Context) {
      * - 48-50°C: 50-75% (enfriamiento activo)
      * - 50-55°C: 75-100% (enfriamiento máximo)
      * - > 55°C: 100% (emergencia)
+     * 
+     * Sistema progresivo:
+     * - La velocidad aumenta gradualmente en incrementos de 15%
+     * - Se mantiene cada velocidad al menos 30 segundos para permitir enfriamiento
+     * - En emergencia (>60°C) se permite salto directo a máxima velocidad
      */
     private fun calculateRecommendedSpeed(temp: Float): Int {
-        val rawSpeed = when {
+        val currentTime = System.currentTimeMillis()
+        
+        // Calcular velocidad objetivo ideal según temperatura
+        val targetSpeed = when {
             // Temperatura segura: cooler apagado o mínimo
             temp < TEMP_SAFE -> 0
             
@@ -365,32 +383,85 @@ class ThermalMonitor(private val context: Context) {
             else -> 100
         }
         
-        // ESTABILIZACIÓN: Solo cambiar si la diferencia es significativa
-        val speedDiff = kotlin.math.abs(rawSpeed - lastRecommendedSpeed)
-        
-        return if (speedDiff >= MIN_SPEED_CHANGE) {
-            // Cambio significativo: actualizar
-            speedChangeCounter++
-            if (BuildConfig.DEBUG || temp >= TEMP_HOT) {
-                Log.d(TAG, "Temp: ${"%.1f".format(temp)}°C → Cambio de velocidad: $lastRecommendedSpeed% → $rawSpeed% (cambio #$speedChangeCounter)")
+        // EMERGENCIA: Si temperatura es crítica (>60°C), saltar directamente a velocidad objetivo
+        if (temp >= TEMP_CRITICAL) {
+            if (targetSpeed != lastRecommendedSpeed) {
+                speedChangeCounter++
+                Log.w(TAG, "⚠️ EMERGENCIA: Temp: ${"%.1f".format(temp)}°C → Velocidad directa a $targetSpeed% (sin rampa)")
             }
-            lastRecommendedSpeed = rawSpeed
-            rawSpeed
-        } else {
-            // Cambio pequeño: mantener velocidad anterior (estabilidad)
-            lastRecommendedSpeed
+            lastRecommendedSpeed = targetSpeed
+            currentTargetSpeed = targetSpeed
+            lastSpeedIncreaseTime = currentTime
+            timeAtCurrentSpeed = currentTime
+            return targetSpeed
         }
+        
+        // RAMPA PROGRESIVA: Aumentar velocidad gradualmente
+        
+        // Si necesitamos aumentar velocidad
+        if (targetSpeed > lastRecommendedSpeed) {
+            // Verificar si hemos esperado suficiente tiempo en la velocidad actual
+            val timeAtSpeed = currentTime - timeAtCurrentSpeed
+            val timeSinceLastIncrease = currentTime - lastSpeedIncreaseTime
+            
+            // Permitir incremento si:
+            // 1. Hemos esperado el tiempo mínimo en esta velocidad (30s)
+            // 2. Ha pasado el delay entre incrementos (20s)
+            if (timeAtSpeed >= MIN_TIME_AT_SPEED && timeSinceLastIncrease >= PROGRESSIVE_INCREASE_DELAY) {
+                // Incrementar gradualmente
+                val nextSpeed = (lastRecommendedSpeed + SPEED_INCREMENT).coerceAtMost(targetSpeed)
+                
+                if (nextSpeed != lastRecommendedSpeed) {
+                    speedChangeCounter++
+                    Log.d(TAG, "📈 PROGRESIVO: Temp: ${"%.1f".format(temp)}°C → $lastRecommendedSpeed% → $nextSpeed% (objetivo: $targetSpeed%, tiempo en velocidad: ${timeAtSpeed/1000}s)")
+                    lastRecommendedSpeed = nextSpeed
+                    lastSpeedIncreaseTime = currentTime
+                    timeAtCurrentSpeed = currentTime
+                    return nextSpeed
+                } else {
+                    return lastRecommendedSpeed
+                }
+            } else {
+                // Aún no es tiempo de incrementar, mantener velocidad actual
+                val remainingTime = maxOf(
+                    (MIN_TIME_AT_SPEED - timeAtSpeed) / 1000,
+                    (PROGRESSIVE_INCREASE_DELAY - timeSinceLastIncrease) / 1000
+                )
+                if (BuildConfig.DEBUG && remainingTime > 0 && remainingTime % 10L == 0L) {
+                    Log.d(TAG, "⏳ Esperando ${remainingTime}s antes del próximo incremento (actual: $lastRecommendedSpeed%, objetivo: $targetSpeed%)")
+                }
+                return lastRecommendedSpeed
+            }
+        }
+        // Si necesitamos reducir velocidad (temperatura bajando)
+        else if (targetSpeed < lastRecommendedSpeed) {
+            // Permitir reducción inmediata cuando la temperatura baja
+            val speedDiff = lastRecommendedSpeed - targetSpeed
+            
+            // Solo reducir si la diferencia es significativa (>10%)
+            if (speedDiff >= MIN_SPEED_CHANGE) {
+                speedChangeCounter++
+                Log.d(TAG, "📉 REDUCCIÓN: Temp: ${"%.1f".format(temp)}°C → $lastRecommendedSpeed% → $targetSpeed%")
+                lastRecommendedSpeed = targetSpeed
+                timeAtCurrentSpeed = currentTime
+                return targetSpeed
+            }
+        }
+        
+        // Mantener velocidad actual
+        return lastRecommendedSpeed
     }
     
     /**
      * Calcula el intervalo adaptativo de monitoreo basado en el nivel de temperatura
+     * Intervalos reducidos para mejor respuesta del sistema progresivo
      */
     fun getAdaptiveInterval(tempLevel: TempLevel): Long {
         return when (tempLevel) {
-            TempLevel.SAFE -> 60000L      // 60 segundos si seguro
-            TempLevel.WARM -> 30000L      // 30 segundos si tibio
-            TempLevel.HOT -> 15000L       // 15 segundos si caliente
-            TempLevel.CRITICAL -> 5000L   // 5 segundos si crítico
+            TempLevel.SAFE -> 45000L      // 45 segundos si seguro (reducido desde 60s)
+            TempLevel.WARM -> 20000L      // 20 segundos si tibio (reducido desde 30s)
+            TempLevel.HOT -> 10000L       // 10 segundos si caliente (reducido desde 15s)
+            TempLevel.CRITICAL -> 5000L   // 5 segundos si crítico (sin cambio)
         }
     }
 }

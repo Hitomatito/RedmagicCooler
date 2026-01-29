@@ -36,6 +36,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.core.content.edit
 
 /**
@@ -95,6 +96,9 @@ class CoolerService : Service() {
     private val maxReconnectAttempts = 5
     private var isScanning = false
     private var lastNotificationTime = 0L
+    private var lastNotifiedSpeed = -1
+    private var lastNotifiedTemp = -1f
+    private var currentSpeedFromRead = -1 // Para almacenar resultado de lecturas BLE
     private var reconnectBackoffMs = 2000L // Backoff inicial
     
     // Perfil específico para el modo automático
@@ -210,6 +214,8 @@ class CoolerService : Service() {
                         // Conectar directamente al dispositivo usando su MAC
                         logDebug("Conectando al dispositivo del perfil: $deviceMac")
                         connectDirectlyToDevice(deviceMac)
+                        // Realizar calibración inicial después de conectar
+                        performInitialCalibration()
                         startThermalMonitoring()
                     } else {
                         Log.e(TAG, "Tipo de dispositivo invalido recibido: $deviceTypeName")
@@ -349,6 +355,17 @@ class CoolerService : Service() {
         // Mostrar métricas finales de batería
         logBatteryMetrics()
         
+        // CRÍTICO: Limpiar estado del perfil SIEMPRE al destruir
+        activeProfile?.let { profile ->
+            try {
+                ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
+                ProfileRepository.getInstance(this).updateConnectionState(profile.id, false)
+                Log.d(TAG, "Estado del perfil ${profile.name} limpiado en onDestroy")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error limpiando estado del perfil: ${e.message}")
+            }
+        }
+        
         // Guardar estado antes de destruir
         saveState()
         
@@ -452,10 +469,12 @@ class CoolerService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Control Automático del Cooler",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_MIN  // MIN para no mostrar en barra de estado
             ).apply {
                 description = "Monitoreo térmico y control automático del RedMagic Cooler"
                 setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
             }
             
             val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -486,9 +505,40 @@ class CoolerService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         
+        // Determinar emoji y mensaje según el contexto
+        val statusEmoji: String
+        val title: String
+        val contentText: String
+        
+        // Si no está conectado o hay un error
+        if (status.contains("Error") || status.contains("Esperando") || 
+            status.contains("Buscando") || status.contains("Conectando") || 
+            status.contains("Desconectado")) {
+            statusEmoji = "⚪"
+            title = "Modo Automático"
+            contentText = status
+        } else {
+            // Conectado y funcionando
+            statusEmoji = when (status) {
+                "Critico" -> "🔴"
+                "Caliente" -> "🟠"
+                "Tibio" -> "🟡"
+                "Normal" -> "🟢"
+                else -> "🟢"
+            }
+            
+            title = "$statusEmoji ${"%.1f".format(temp)}°C • Modo Auto"
+            
+            contentText = if (speed > 0) {
+                "Enfriando $speed% • $status"
+            } else {
+                "En reposo • Temp. $status"
+            }
+        }
+        
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CPU: ${"%.1f".format(temp)}°C")
-            .setContentText("$speed%")
+            .setContentTitle(title)
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .setShowWhen(false)
@@ -506,7 +556,8 @@ class CoolerService : Service() {
                 stopPendingIntent
             )
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_MIN)  // MIN para no mostrar en status bar
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)  // Diferir mostrar en status bar
             .build()
     }
     
@@ -516,11 +567,18 @@ class CoolerService : Service() {
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
     
-    private fun updateNotificationIfNeeded(status: String, speed: Int, temp: Float) {
+    private fun updateNotificationIfNeeded(status: String, speed: Int, temp: Float, forceUpdate: Boolean = false) {
         val currentTime = System.currentTimeMillis()
-        if (currentTime - lastNotificationTime > 30000L) { // 30 segundos
+        val speedChanged = speed != lastNotifiedSpeed
+        val tempChangedSignificantly = kotlin.math.abs(temp - lastNotifiedTemp) >= 1.0f
+        val timeLimitReached = currentTime - lastNotificationTime > 30000L
+        
+        // Actualizar si: 1) cambió velocidad, 2) temp cambió >1°C, 3) pasaron 30s, o 4) forzado
+        if (forceUpdate || speedChanged || tempChangedSignificantly || timeLimitReached) {
             updateNotification(status, speed, temp)
             lastNotificationTime = currentTime
+            lastNotifiedSpeed = speed
+            lastNotifiedTemp = temp
         }
     }
     
@@ -850,7 +908,14 @@ class CoolerService : Service() {
                         Log.i(TAG, "═══════════════════════════════════════════════")
                     }
                     
-                    updateNotification("Conectado", currentSpeed, currentTemp)
+                    // Determinar estado térmico inicial
+                    val initialTempStatus = when {
+                        currentTemp >= ThermalMonitor.TEMP_CRITICAL -> "Critico"
+                        currentTemp >= ThermalMonitor.TEMP_HOT -> "Caliente"
+                        currentTemp >= ThermalMonitor.TEMP_WARM -> "Tibio"
+                        else -> "Normal"
+                    }
+                    updateNotification(initialTempStatus, currentSpeed, currentTemp)
                     
                     // Aplicar configuración RGB pendiente si existe
                     pendingRGBConfig?.let { config ->
@@ -886,6 +951,37 @@ class CoolerService : Service() {
                 Log.e(TAG, "Error descubriendo servicios, status: $status")
                 updateNotification("Error descubriendo servicios", 0, currentTemp)
             }
+        }
+        
+        @Suppress("DEPRECATION")
+        @Deprecated("Deprecated in API 33")
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                @Suppress("DEPRECATION")
+                val data = characteristic.value
+                if (data != null && data.isNotEmpty()) {
+                    val rawSpeed = data[0].toInt() and 0xFF
+                    val speedPercent = MainActivity.mapRawToPercent(rawSpeed)
+                    
+                    // Si estamos esperando una lectura para calibración inicial
+                    if (currentSpeedFromRead == -1) {
+                        currentSpeedFromRead = speedPercent
+                        logDebug("Velocidad leída del cooler: $speedPercent% (raw: $rawSpeed)")
+                    } else {
+                        // Lectura normal - actualizar velocidad actual
+                        currentSpeed = speedPercent
+                        logDebug("Velocidad actualizada: $speedPercent%")
+                    }
+                }
+            } else {
+                logDebug("Error leyendo characteristic: $status")
+                currentSpeedFromRead = -1 // Indicar error
+            }
+        }
+        
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            // Manejar cambios en características (notificaciones)
+            onCharacteristicRead(gatt, characteristic, BluetoothGatt.GATT_SUCCESS)
         }
     }
     
@@ -1023,6 +1119,113 @@ class CoolerService : Service() {
         }
     }
     
+    /**
+     * Lee la velocidad actual del cooler desde el dispositivo BLE
+     * @return velocidad en porcentaje (0-100) o -1 si no se pudo leer
+     */
+    private suspend fun readCurrentFanSpeed(): Int {
+        if (!isConnected || bluetoothGatt == null || fanCharacteristic == null) {
+            return -1
+        }
+        
+        return try {
+            if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
+                return -1
+            }
+            
+            // Intentar leer la característica del fan
+            @SuppressLint("MissingPermission")
+            val success = bluetoothGatt?.readCharacteristic(fanCharacteristic)
+            
+            if (success == true) {
+                // Esperar hasta 2 segundos por la respuesta
+                var attempts = 0
+                while (attempts < 20 && currentSpeedFromRead == -1) {
+                    delay(100L)
+                    attempts++
+                }
+                
+                val speed = currentSpeedFromRead
+                currentSpeedFromRead = -1 // Reset para próxima lectura
+                speed
+            } else {
+                -1
+            }
+        } catch (e: Exception) {
+            logDebug("Error leyendo velocidad del cooler: ${e.message}")
+            -1
+        }
+    }
+    
+    /**
+     * Realiza calibración inicial al activar modo automático
+     * Obtiene datos térmicos y velocidad actual del cooler inmediatamente
+     */
+    private fun performInitialCalibration() {
+        serviceScope.launch {
+            try {
+                logDebug("Iniciando calibración inicial del modo automático...")
+                
+                // Esperar 2 segundos para que la conexión BLE se estabilice
+                delay(2000L)
+                
+                // Obtener datos térmicos actuales inmediatamente
+                val thermalData = thermalMonitor.getCurrentThermalData(0)
+                currentTemp = thermalData.maxTemp
+                
+                logDebug("Calibración inicial - Temperatura: ${thermalData.maxTemp}°C, Nivel: ${thermalData.tempLevel}")
+                
+                // Leer velocidad actual del cooler desde el dispositivo
+                if (isConnected && fanCharacteristic != null) {
+                    try {
+                        // Intentar leer la velocidad actual del cooler
+                        val currentDeviceSpeed = readCurrentFanSpeed()
+                        if (currentDeviceSpeed >= 0) {
+                            currentSpeed = currentDeviceSpeed
+                            logDebug("Calibración inicial - Velocidad actual del cooler: $currentSpeed%")
+                            
+                            // Actualizar notificación con datos calibrados
+                            val tempStatus = when (thermalData.tempLevel) {
+                                ThermalMonitor.TempLevel.SAFE -> "Normal"
+                                ThermalMonitor.TempLevel.WARM -> "Tibio" 
+                                ThermalMonitor.TempLevel.HOT -> "Caliente"
+                                ThermalMonitor.TempLevel.CRITICAL -> "Crítico"
+                            }
+                            updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
+                            
+                            // Si la velocidad recomendada es significativamente diferente, aplicar ajuste inicial
+                            val recommendedSpeed = thermalData.recommendedSpeed
+                            if (Math.abs(recommendedSpeed - currentSpeed) >= 15) {
+                                logDebug("Aplicando ajuste inicial: $currentSpeed% → $recommendedSpeed%")
+                                setFanSpeed(recommendedSpeed)
+                            } else {
+                                logDebug("Velocidad actual ($currentSpeed%) está cerca de la recomendada ($recommendedSpeed%), manteniendo")
+                            }
+                        } else {
+                            logDebug("No se pudo leer velocidad actual del cooler, usando velocidad recomendada")
+                            // Usar velocidad recomendada como inicial
+                            val recommendedSpeed = thermalData.recommendedSpeed
+                            setFanSpeed(recommendedSpeed)
+                            currentSpeed = recommendedSpeed
+                        }
+                    } catch (e: Exception) {
+                        logDebug("Error leyendo velocidad actual: ${e.message}, usando velocidad recomendada")
+                        val recommendedSpeed = thermalData.recommendedSpeed
+                        setFanSpeed(recommendedSpeed)
+                        currentSpeed = recommendedSpeed
+                    }
+                } else {
+                    logDebug("Cooler no conectado, esperando conexión para calibración")
+                }
+                
+                logDebug("Calibración inicial completada")
+                
+            } catch (e: Exception) {
+                logDebug("Error en calibración inicial: ${e.message}")
+            }
+        }
+    }
+
     private fun startThermalMonitoring() {
         thermalMonitor.startMonitoring(serviceScope) { data ->
             currentTemp = data.maxTemp
@@ -1030,10 +1233,23 @@ class CoolerService : Service() {
             if (isConnected && fanCharacteristic != null) {
                 val currentTime = System.currentTimeMillis()
                 
-                // Ajustar cada 15 segundos (más estable)
-                if (currentTime - lastAutoAdjustTime > 15000) {
-                    setFanSpeed(data.recommendedSpeed)
-                    lastAutoAdjustTime = currentTime
+                // Ajustar más frecuentemente para mejor respuesta del sistema progresivo
+                // Intervalo reducido a 10 segundos (desde 15s) para mejor progresión
+                if (currentTime - lastAutoAdjustTime > 10000) {
+                    val recommendedSpeed = data.recommendedSpeed
+                    
+                    // Solo aplicar el cambio si la velocidad recomendada es diferente
+                    // Esto permite que el sistema progresivo controle el ritmo de incremento
+                    if (recommendedSpeed != currentSpeed) {
+                        setFanSpeed(recommendedSpeed)
+                        lastAutoAdjustTime = currentTime
+                        
+                        // Log informativo para temperaturas elevadas
+                        if (data.tempLevel == ThermalMonitor.TempLevel.HOT || 
+                            data.tempLevel == ThermalMonitor.TempLevel.CRITICAL) {
+                            Log.i(TAG, "Ajuste automático: ${data.maxTemp}°C → $recommendedSpeed%")
+                        }
+                    }
                 }
                 
                 val tempStatus = when (data.tempLevel) {
@@ -1043,6 +1259,7 @@ class CoolerService : Service() {
                     ThermalMonitor.TempLevel.CRITICAL -> "Critico"
                 }
                 
+                // Actualizar notificación (se actualizará automáticamente si hay cambios significativos)
                 updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
             } else {
                 updateNotificationIfNeeded("Esperando conexión", 0, currentTemp)
@@ -1074,8 +1291,24 @@ class CoolerService : Service() {
                     val result = bluetoothGatt?.writeCharacteristic(characteristic)
                     
                     if (result == true) {
+                        val previousSpeed = currentSpeed
                         currentSpeed = speed
                         logDebug("Ajustando velocidad automáticamente: $speed% (raw: $rawValue)")
+                        
+                        // Actualizar notificación inmediatamente al cambiar velocidad
+                        if (previousSpeed != speed) {
+                            val tempStatus = when {
+                                currentTemp >= ThermalMonitor.TEMP_CRITICAL -> "Critico"
+                                currentTemp >= ThermalMonitor.TEMP_HOT -> "Caliente"
+                                currentTemp >= ThermalMonitor.TEMP_WARM -> "Tibio"
+                                else -> "Normal"
+                            }
+                            withContext(Dispatchers.Main) {
+                                updateNotification(tempStatus, currentSpeed, currentTemp)
+                                lastNotifiedSpeed = currentSpeed
+                                lastNotifiedTemp = currentTemp
+                            }
+                        }
                     }
                 } catch (e: SecurityException) {
                     Log.e(TAG, "SecurityException escribiendo: ${e.message}")
