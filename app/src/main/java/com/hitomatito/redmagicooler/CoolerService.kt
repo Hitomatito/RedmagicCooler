@@ -428,7 +428,8 @@ class CoolerService : Service() {
             @SuppressLint("MissingPermission")
             val success = autoModeCharacteristic?.let { characteristic ->
                 // Escribir comando según app original: 0x00 para cambiar modo
-                characteristic.value = byteArrayOf(CoolerBleConstants.AUTO_MODE_COMMAND)
+                characteristic.setValue(byteArrayOf(CoolerBleConstants.AUTO_MODE_COMMAND))
+                @Suppress("DEPRECATION")
                 val result = bluetoothGatt?.writeCharacteristic(characteristic) ?: false
                 Log.d(TAG, "Comando de cambio a modo manual enviado. Resultado: $result")
                 result
@@ -1283,8 +1284,7 @@ class CoolerService : Service() {
                     val rawValue = MainActivity.mapPercentToRaw(speed.coerceIn(0, 100))
                     val value = rawValue.toByte()
                     
-                    @Suppress("DEPRECATION")
-                    characteristic.value = byteArrayOf(value)
+                    characteristic.setValue(byteArrayOf(value))
                     
                     @Suppress("DEPRECATION")
                     @SuppressLint("MissingPermission")
@@ -1474,8 +1474,7 @@ class CoolerService : Service() {
                     blue.toByte()
                 )
                 
-                @Suppress("DEPRECATION")
-                lightCharacteristic?.value = command
+                lightCharacteristic?.setValue(command)
                 
                 @Suppress("DEPRECATION")
                 @SuppressLint("MissingPermission")
