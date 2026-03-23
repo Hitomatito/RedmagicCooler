@@ -981,8 +981,7 @@ class MainActivity : ComponentActivity() {
                 val rawValue = mapPercentToRaw(speed.coerceIn(0, 100))
                 val value = rawValue.toByte()
                 
-                @Suppress("DEPRECATION")
-                characteristic.value = byteArrayOf(value)
+                characteristic.setValue(byteArrayOf(value))
                 @Suppress("DEPRECATION")
                 @SuppressLint("MissingPermission")
                 val result = bluetoothGatt?.writeCharacteristic(characteristic)
@@ -1181,8 +1180,7 @@ class MainActivity : ComponentActivity() {
                 blue.toByte()
             )
             
-            @Suppress("DEPRECATION")
-            lightCharacteristic?.value = command
+            lightCharacteristic?.setValue(command)
             
             @Suppress("DEPRECATION")
             @SuppressLint("MissingPermission")

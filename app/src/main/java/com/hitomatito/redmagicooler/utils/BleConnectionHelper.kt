@@ -1,5 +1,6 @@
 package com.hitomatito.redmagicooler.utils
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -17,6 +18,7 @@ object BleConnectionHelper {
      * @param tag Tag para logging
      * @return true si se cerró correctamente, false si hubo errores
      */
+    @SuppressLint("MissingPermission")
     fun safeCloseGatt(gatt: BluetoothGatt?, tag: String = TAG): Boolean {
         return try {
             gatt?.let {
@@ -38,7 +40,7 @@ object BleConnectionHelper {
      * @param tag Tag para logging
      * @return true si se detuvo correctamente, false si hubo errores
      */
-    @android.annotation.SuppressLint("MissingPermission")
+    @SuppressLint("MissingPermission")
     fun safeStopScan(scanner: BluetoothLeScanner?, callback: ScanCallback, tag: String = TAG): Boolean {
         return try {
             scanner?.stopScan(callback)
