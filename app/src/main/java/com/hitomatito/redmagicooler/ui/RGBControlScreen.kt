@@ -51,14 +51,14 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun RGBControlScreen(
     isConnected: Boolean,
+    modifier: Modifier = Modifier,
     isAutoMode: Boolean = false,
     onNavigateBack: () -> Unit,
     onSetColorful: () -> Unit,
     onSetBreathFullColor: () -> Unit,
     onSetBreathSingleColor: (Int, Int, Int) -> Unit,
     onSetAlwaysBright: (Int, Int, Int) -> Unit,
-    onTurnOffLight: () -> Unit,
-    modifier: Modifier = Modifier
+    onTurnOffLight: () -> Unit
 ) {
     // Considerar conectado si hay conexión directa O el servicio está manejando la conexión (modo auto)
     val isEffectivelyConnected = isConnected || isAutoMode
