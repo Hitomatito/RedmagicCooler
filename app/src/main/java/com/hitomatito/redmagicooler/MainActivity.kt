@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
@@ -50,6 +51,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 @Suppress("OVERRIDE_DEPRECATION")
@@ -66,6 +68,7 @@ class MainActivity : ComponentActivity() {
     private var isConnected by mutableStateOf(false)
     private var isConnecting by mutableStateOf(false)
     private var statusMessage by mutableStateOf("Listo")
+    private var connectionError by mutableStateOf<String?>(null)
     private var currentCoolerSpeed by mutableIntStateOf(50)
     
     // Perfil actualmente conectado
@@ -84,6 +87,13 @@ class MainActivity : ComponentActivity() {
     // Contador de reintentos para discovery de servicios
     private var discoveryRetryCount = 0
     private val maxDiscoveryRetries = 2
+    
+    // Flags para manejo de status 22 (GATT_CONN_TERMINATE_LOCAL_HOST) y timeout
+    private var isDiscoveryInProgress = false
+    private var isDiscoveryTimedOut = false
+    private var discoveryTimeoutJob: Job? = null
+    private var status22ReconnectAttempts = 0
+    private val maxStatus22Reconnects = 3
     
     // Monitor térmico y modo automático
     private lateinit var thermalMonitor: ThermalMonitor
@@ -240,6 +250,8 @@ class MainActivity : ComponentActivity() {
                     composable("home") {
                         HomeScreen(
                             profiles = profiles,
+                            connectionError = connectionError,
+                            onDismissError = { connectionError = null },
                             onProfileClick = { profile ->
                                 navController.navigate("profile/${profile.id}")
                             },
@@ -256,12 +268,15 @@ class MainActivity : ComponentActivity() {
                             onDeviceTypeSelected = { deviceType ->
                                 // Iniciar búsqueda para este tipo
                                 Log.d(TAG, "Usuario selecciono dispositivo: ${deviceType.deviceName}")
+                                connectionError = null
                                 pendingNewDeviceType = deviceType
                                 startScanForNewDevice(deviceType)
                             },
                             isScanning = isScanning,
                             isConnecting = isConnecting,
                             statusMessage = statusMessage,
+                            connectionError = connectionError,
+                            onDismissError = { connectionError = null },
                             onCancelScan = { cancelScan() },
                             onProfileCreated = { profileId ->
                                 // Limpiar el estado antes de navegar
@@ -570,6 +585,10 @@ class MainActivity : ComponentActivity() {
                               deviceName.contains("Cooler", ignoreCase = true)
             
             if (isNameMatch) {
+                if (!isScanning) {
+                    Log.d(TAG, "Ignorando scan result duplicado - ya conectando")
+                    return
+                }
                 isScanning = false
                 bluetoothLeScanner?.stopScan(this)
                 
@@ -622,6 +641,159 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Maneja timeout de discoverServices() - cierra GATT y reintenta conexión
+     */
+    private fun handleDiscoverServicesTimeout() {
+        discoveryTimeoutJob = null
+        val profileId = currentConnectedProfileId
+        BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
+        bluetoothGatt = null
+        fanCharacteristic = null
+        lightCharacteristic = null
+        isConnected = false
+        
+        // Mostrar error al usuario inmediatamente, no tras agotar reintentos
+        connectionError = "No se pudo conectar al cooler.\nVerificá que esté encendido y cerca del teléfono."
+        if (profileId != null && status22ReconnectAttempts < maxStatus22Reconnects) {
+            status22ReconnectAttempts++
+            val attempt = status22ReconnectAttempts
+            Log.w(TAG, "Reintentando conexión tras timeout ($attempt/$maxStatus22Reconnects)...")
+            val backoffMs = 2000L
+            monitoringScope.launch {
+                delay(backoffMs)
+                if (isFinishing || isDestroyed) return@launch
+                runOnUiThread {
+                    val profile = profileRepository.getProfile(profileId)
+                    if (profile != null) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            connectToProfile(profile)
+                        } else {
+                            Log.w(TAG, "API level insuficiente para reconectar tras timeout")
+                            statusMessage = "Error: API no compatible para reconexión"
+                            status22ReconnectAttempts = 0
+                        }
+                    } else {
+                        statusMessage = "Error al reconectar tras timeout"
+                        status22ReconnectAttempts = 0
+                    }
+                }
+            }
+        } else {
+            statusMessage = "Error: tiempo de conexión agotado"
+            currentConnectedProfileId?.let { pid ->
+                profileRepository.updateConnectionState(pid, false)
+            }
+            currentConnectedProfileId = null
+            status22ReconnectAttempts = 0
+        }
+    }
+
+    private fun processDiscoveredServices(gatt: BluetoothGatt, services: List<BluetoothGattService>) {
+        if (services.isEmpty() && discoveryRetryCount < maxDiscoveryRetries) {
+            discoveryRetryCount++
+            Log.w(TAG, "Lista de servicios vacia - Reintentando discovery ($discoveryRetryCount/$maxDiscoveryRetries)...")
+            statusMessage = "Reintentando descubrimiento ($discoveryRetryCount/$maxDiscoveryRetries)..."
+            
+            monitoringScope.launch {
+                delay(1500L)
+                if (isFinishing || isDestroyed || !isConnected) return@launch
+                runOnUiThread {
+                    try {
+                        @SuppressLint("MissingPermission")
+                        if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
+                            Log.d(TAG, "Reintentando discoverServices()...")
+                            gatt.discoverServices()
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error en reintento de discovery: ${e.message}")
+                        statusMessage = "Error en reintento"
+                    }
+                }
+            }
+            return
+        }
+        
+        services.forEachIndexed { index, service ->
+            Log.d(TAG, "Servicio #${index + 1}: ${service.uuid}")
+            service.characteristics.forEach { ch ->
+                val props = mutableListOf<String>()
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) props.add("READ")
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) props.add("WRITE")
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) props.add("WRITE_NO_RESPONSE")
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) props.add("NOTIFY")
+                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) props.add("INDICATE")
+                Log.d(TAG, "   └─ Characteristic: ${ch.uuid}")
+                Log.d(TAG, "      Properties: ${props.joinToString(", ")}")
+            }
+        }
+        
+        Log.d(TAG, "Buscando servicio del fan: ${CoolerBleConstants.FAN_SERVICE_UUID}")
+        
+        var fanService = gatt.getService(CoolerBleConstants.FAN_SERVICE_UUID)
+        if (fanService != null) {
+            Log.d(TAG, "Servicio del fan encontrado directamente")
+            fanCharacteristic = fanService.getCharacteristic(CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID)
+            lightCharacteristic = fanService.getCharacteristic(CoolerBleConstants.LIGHT_CONTROL_UUID)
+        } else {
+            Log.d(TAG, "Servicio del fan NO encontrado, buscando características en todos los servicios...")
+            for (service in gatt.services ?: emptyList()) {
+                val fanChar = service.getCharacteristic(CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID)
+                if (fanChar != null) {
+                    fanCharacteristic = fanChar
+                    fanService = service
+                    Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
+                }
+                val lightChar = service.getCharacteristic(CoolerBleConstants.LIGHT_CONTROL_UUID)
+                if (lightChar != null) {
+                    lightCharacteristic = lightChar
+                    Log.d(TAG, "Light characteristic encontrada en servicio: ${service.uuid}")
+                }
+                if (fanCharacteristic != null && lightCharacteristic != null) break
+            }
+        }
+        
+        if (fanCharacteristic != null) {
+            statusMessage = "Listo para controlar"
+            Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
+            
+            handleSuccessfulConnection()
+            thermalMonitor.startAmbientSensor()
+            startThermalMonitoring()
+            
+            try {
+                if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
+                    return
+                }
+                @SuppressLint("MissingPermission")
+                gatt.setCharacteristicNotification(fanCharacteristic, true)
+                @SuppressLint("MissingPermission")
+                gatt.readCharacteristic(fanCharacteristic)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
+            }
+        } else {
+            if (services.isEmpty()) {
+                statusMessage = "Error: No se pudieron obtener servicios del dispositivo"
+                Log.e(TAG, "Lista de servicios vacia despues de $discoveryRetryCount reintentos")
+                Toast.makeText(this@MainActivity, 
+                    "No se pudieron obtener los servicios BLE del dispositivo. Intenta:\n" +
+                    "1. Apagar y encender el cooler\n" +
+                    "2. Acercarlo mas al telefono\n" +
+                    "3. Reiniciar Bluetooth", 
+                    Toast.LENGTH_LONG).show()
+            } else {
+                statusMessage = "Error: Características no encontradas"
+                Log.e(TAG, "Fan characteristic NO encontrada")
+                Log.e(TAG, "   Buscada: ${CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID}")
+                Log.e(TAG, "   En servicio: ${CoolerBleConstants.FAN_SERVICE_UUID}")
+                Toast.makeText(this@MainActivity, 
+                    "No se encontraron las caracteristicas BLE necesarias. Verifica el modelo del dispositivo.", 
+                    Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun disconnectFromCooler() {
         try {
             if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
@@ -632,6 +804,12 @@ class MainActivity : ComponentActivity() {
                 BleConnectionHelper.safeStopScan(bluetoothLeScanner, bleScanCallback, TAG)
                 isScanning = false
             }
+            
+            // Resetear contadores de reconexión automática
+            status22ReconnectAttempts = 0
+            discoveryTimeoutJob?.cancel()
+            discoveryTimeoutJob = null
+            isDiscoveryInProgress = false
             
             // Actualizar estado del perfil antes de desconectar
             currentConnectedProfileId?.let { profileId ->
@@ -669,7 +847,9 @@ class MainActivity : ComponentActivity() {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         isConnected = true
-                        discoveryRetryCount = 0 // Resetear contador
+                        connectionError = null
+                        discoveryRetryCount = 0
+                        status22ReconnectAttempts = 0
                         statusMessage = "Conectado, preparando..."
                         Log.d(TAG, "Conectado al cooler exitosamente")
                         Log.d(TAG, "   Device: ${gatt.device.address}")
@@ -679,26 +859,54 @@ class MainActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         
-                        // Refrescar caché GATT antes de descubrir servicios
-                        // Esto soluciona un bug de Android donde los servicios pueden venir vacíos
-                        Log.d(TAG, "Refrescando cache GATT...")
-                        BleConnectionHelper.refreshGattCache(gatt, TAG)
-                        
-                        // Delay aumentado a 1 segundo para dar tiempo al cooler
+                        // Delay para dar tiempo al cooler antes de descubrir servicios
                         monitoringScope.launch {
-                            delay(1000L)
+                            delay(800L)
                             if (isFinishing || isDestroyed || !isConnected) return@launch
                             
                             runOnUiThread {
+                                isDiscoveryInProgress = true
                                 statusMessage = "Descubriendo servicios..."
                                 try {
                                     @SuppressLint("MissingPermission")
                                     if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
+                                        // Verificar si ya hay servicios cacheados del BLE stack
+                                        val cachedServices = gatt.services
+                                        if (cachedServices != null && cachedServices.isNotEmpty()) {
+                                            Log.d(TAG, "Servicios disponibles desde caché BLE (${cachedServices.size}), saltando discoverServices()")
+                                            isDiscoveryInProgress = false
+                                            processDiscoveredServices(gatt, cachedServices)
+                                            return@runOnUiThread
+                                        }
                                         Log.d(TAG, "Iniciando descubrimiento de servicios...")
                                         gatt.discoverServices()
+                                        
+                                        // Timeout watchdog: si discoverServices no responde en 15s, reconectar
+                                        discoveryTimeoutJob?.cancel()
+                                        discoveryTimeoutJob = monitoringScope.launch {
+                                            delay(15000L)
+                                            if (isFinishing || isDestroyed || !isDiscoveryInProgress) return@launch
+                                            runOnUiThread {
+                                                Log.w(TAG, "⚠️ discoverServices() timeout - sin respuesta en 15s")
+                                                statusMessage = "Tiempo de espera agotado, reintentando..."
+                                                isDiscoveryInProgress = false
+                                                isDiscoveryTimedOut = true
+                                                // Disparar desconexión para que el callback maneje el reintento
+                                                try {
+                                                    @SuppressLint("MissingPermission")
+                                                    if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
+                                                        bluetoothGatt?.disconnect()
+                                                    }
+                                                } catch (e: SecurityException) {
+                                                    Log.e(TAG, "SecurityException al desconectar por timeout: ${e.message}")
+                                                    handleDiscoverServicesTimeout()
+                                                }
+                                            }
+                                        }
                                     }
                                 } catch (e: SecurityException) {
                                     Log.e(TAG, "SecurityException al descubrir servicios: ${e.message}")
+                                    isDiscoveryInProgress = false
                                     statusMessage = "Error de permisos al descubrir servicios"
                                 }
                             }
@@ -706,18 +914,76 @@ class MainActivity : ComponentActivity() {
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         isConnected = false
+                        isConnecting = false
+                        discoveryTimeoutJob?.cancel()
+                        discoveryTimeoutJob = null
                         
-                        // Si estamos en medio de un reintento de discovery, no procesardesconexión
+                        // TIMEOUT DE DISCOVERY: Si el timeout watchdog disparó la desconexión,
+                        // manejamos el reintento aquí para evitar que el flujo normal lo sobreescriba
+                        if (isDiscoveryTimedOut) {
+                            isDiscoveryTimedOut = false
+                            handleDiscoverServicesTimeout()
+                            return@runOnUiThread
+                        }
+                        
+                        // STATUS 22 (GATT_CONN_TERMINATE_LOCAL_HOST):
+                        // El stack BLE local terminó la conexión. Ocurre cuando Android
+                        // detecta un estado interno inconsistente (ej: tras refreshGattCache por reflection).
+                        // Estrategia: auto-reconectar con backoff progresivo hasta maxStatus22Reconnects.
+                        if (status == 22) {
+                            connectionError = "Se perdió la conexión. Reintentando..."
+                            if (status22ReconnectAttempts < maxStatus22Reconnects && currentConnectedProfileId != null) {
+                                status22ReconnectAttempts++
+                                isDiscoveryInProgress = false
+                                val profileId = currentConnectedProfileId
+                                val attempt = status22ReconnectAttempts
+                                Log.w(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - Reintentando ($attempt/$maxStatus22Reconnects)...")
+                                statusMessage = "Reconectando (intento $attempt)..."
+                                
+                                fanCharacteristic = null
+                                lightCharacteristic = null
+                                
+                                val backoffMs = (2000L * attempt).coerceAtMost(8000L)
+                                monitoringScope.launch {
+                                    delay(backoffMs)
+                                    if (isFinishing || isDestroyed) return@launch
+                                    runOnUiThread {
+                                        val profile = profileId?.let { profileRepository.getProfile(it) }
+                                        if (profile != null) {
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                                connectToProfile(profile)
+                                            } else {
+                                                Log.w(TAG, "API level insuficiente para reconectar tras status 22")
+                                                statusMessage = "Error: API no compatible para reconexión"
+                                                status22ReconnectAttempts = 0
+                                            }
+                                        } else {
+                                            statusMessage = "Error: perfil no encontrado para reconectar"
+                                            status22ReconnectAttempts = 0
+                                        }
+                                    }
+                                }
+                                return@runOnUiThread
+                            }
+                            status22ReconnectAttempts = 0
+                            Log.e(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - Reintentos agotados")
+                        }
+                        
+                        // Si estamos en medio de un reintento de discovery, no procesar desconexión
                         if (discoveryRetryCount in 1..<maxDiscoveryRetries) {
                             Log.w(TAG, "Desconexión durante reintento de discovery (intento $discoveryRetryCount), ignorando...")
                             return@runOnUiThread
                         }
                         
+                        if (status != BluetoothGatt.GATT_SUCCESS && status != 22) {
+                            connectionError = "Se perdió la conexión con el cooler.\nVerificá que esté encendido y cerca."
+                        }
                         statusMessage = "Desconectado"
                         Log.d(TAG, "Desconectado del cooler, status: $status")
                         fanCharacteristic = null
                         lightCharacteristic = null
-                        discoveryRetryCount = 0 // Resetear contador
+                        discoveryRetryCount = 0
+                        isDiscoveryInProgress = false
                         
                         // Actualizar estado del perfil
                         currentConnectedProfileId?.let { profileId ->
@@ -739,134 +1005,24 @@ class MainActivity : ComponentActivity() {
             }
             
             runOnUiThread {
+                // Si el timeout de discovery ya disparó, ignorar este callback tardío
+                // El stack BLE se desbloquea cuando disconnect() cancela la operación colgada,
+                // pero los servicios obtenidos son poco confiables y la reconexión ya está en curso.
+                if (isDiscoveryTimedOut) {
+                    Log.w(TAG, "onServicesDiscovered ignorado - timeout de discovery ya fue manejado")
+                    return@runOnUiThread
+                }
+                
+                // Cancelar timeout watchdog y limpiar flags de discovery
+                discoveryTimeoutJob?.cancel()
+                discoveryTimeoutJob = null
+                isDiscoveryInProgress = false
+                
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "Servicios descubiertos exitosamente")
-                    
-                    // Loguear todos los servicios y características encontradas
                     val services = gatt.services ?: emptyList()
                     Log.d(TAG, "Total de servicios encontrados: ${services.size}")
-                    
-                    // BUG DE ANDROID: A veces la lista de servicios está vacía después del callback
-                    // Solución: Reintentar discovery después de un delay
-                    if (services.isEmpty() && discoveryRetryCount < maxDiscoveryRetries) {
-                        discoveryRetryCount++
-                        Log.w(TAG, "Lista de servicios vacia - Reintentando discovery ($discoveryRetryCount/$maxDiscoveryRetries)...")
-                        statusMessage = "Reintentando descubrimiento ($discoveryRetryCount/$maxDiscoveryRetries)..."
-                        
-                        monitoringScope.launch {
-                            delay(1500L) // Delay más largo para el reintento
-                            if (isFinishing || isDestroyed || !isConnected) return@launch
-                            
-                            runOnUiThread {
-                                try {
-                                    @SuppressLint("MissingPermission")
-                                    if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                                        Log.d(TAG, "Reintentando discoverServices()...")
-                                        gatt.discoverServices()
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error en reintento de discovery: ${e.message}")
-                                    statusMessage = "Error en reintento"
-                                }
-                            }
-                        }
-                        return@runOnUiThread
-                    }
-                    
-                    services.forEachIndexed { index, service ->
-                        Log.d(TAG, "Servicio #${index + 1}: ${service.uuid}")
-                        service.characteristics.forEach { char ->
-                            val props = mutableListOf<String>()
-                            if (char.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) props.add("READ")
-                            if (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) props.add("WRITE")
-                            if (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) props.add("WRITE_NO_RESPONSE")
-                            if (char.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) props.add("NOTIFY")
-                            if (char.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) props.add("INDICATE")
-                            Log.d(TAG, "   └─ Characteristic: ${char.uuid}")
-                            Log.d(TAG, "      Properties: ${props.joinToString(", ")}")
-                        }
-                    }
-                    
-                    Log.d(TAG, "Buscando servicio del fan: ${CoolerBleConstants.FAN_SERVICE_UUID}")
-                    
-                    // Buscar características
-                    var fanService = gatt.getService(CoolerBleConstants.FAN_SERVICE_UUID)
-                    if (fanService != null) {
-                        Log.d(TAG, "Servicio del fan encontrado directamente")
-                        fanCharacteristic = fanService.getCharacteristic(CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID)
-                        lightCharacteristic = fanService.getCharacteristic(CoolerBleConstants.LIGHT_CONTROL_UUID)
-                    } else {
-                        Log.d(TAG, "Servicio del fan NO encontrado, buscando características en todos los servicios...")
-                        // Buscar en todos los servicios
-                        for (service in gatt.services ?: emptyList()) {
-                            val fanChar = service.getCharacteristic(CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID)
-                            if (fanChar != null) {
-                                fanCharacteristic = fanChar
-                                fanService = service
-                                Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
-                            }
-                            val lightChar = service.getCharacteristic(CoolerBleConstants.LIGHT_CONTROL_UUID)
-                            if (lightChar != null) {
-                                lightCharacteristic = lightChar
-                                Log.d(TAG, "Light characteristic encontrada en servicio: ${service.uuid}")
-                            }
-                            if (fanCharacteristic != null && lightCharacteristic != null) break
-                        }
-                    }
-                    
-                    if (fanCharacteristic != null) {
-                        statusMessage = "Listo para controlar"
-                        Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
-                        
-                        // Crear o actualizar perfil
-                        handleSuccessfulConnection()
-                        
-                        // Iniciar monitoreo térmico
-                        thermalMonitor.startAmbientSensor()
-                        startThermalMonitoring()
-                        
-                        // Habilitar notificaciones y leer velocidad
-                        try {
-                            if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                                return@runOnUiThread
-                            }
-                            
-                            @SuppressLint("MissingPermission")
-                            gatt.setCharacteristicNotification(fanCharacteristic, true)
-                            
-                            @SuppressLint("MissingPermission")
-                            gatt.readCharacteristic(fanCharacteristic)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
-                        }
-                    } else {
-                        // Si la lista de servicios está vacía y ya agotamos reintentos
-                        if (services.isEmpty()) {
-                            statusMessage = "Error: No se pudieron obtener servicios del dispositivo"
-                            Log.e(TAG, "Lista de servicios vacia despues de $discoveryRetryCount reintentos")
-                            Log.e(TAG, "Posibles causas:")
-                            Log.e(TAG, "   1. El dispositivo está fuera de rango o con señal débil")
-                            Log.e(TAG, "   2. El cooler necesita reiniciarse")
-                            Log.e(TAG, "   3. Problema con el caché BLE del sistema Android")
-                            Toast.makeText(this@MainActivity, 
-                                "No se pudieron obtener los servicios BLE del dispositivo. Intenta:\n" +
-                                "1. Apagar y encender el cooler\n" +
-                                "2. Acercarlo mas al telefono\n" +
-                                "3. Reiniciar Bluetooth", 
-                                Toast.LENGTH_LONG).show()
-                        } else {
-                            // Hay servicios pero no encontramos las características esperadas
-                            statusMessage = "Error: Características no encontradas"
-                            Log.e(TAG, "Fan characteristic NO encontrada")
-                            Log.e(TAG, "   Buscada: ${CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID}")
-                            Log.e(TAG, "   En servicio: ${CoolerBleConstants.FAN_SERVICE_UUID}")
-                            Log.e(TAG, "Verifica que los UUIDs sean correctos para tu modelo de cooler")
-                            
-                            Toast.makeText(this@MainActivity, 
-                                "No se encontraron las caracteristicas BLE necesarias. Verifica el modelo del dispositivo.", 
-                                Toast.LENGTH_LONG).show()
-                        }
-                    }
+                    processDiscoveredServices(gatt, services)
                 } else {
                     statusMessage = "Error descubriendo servicios"
                     Log.e(TAG, "Error en descubrimiento de servicios: $status")

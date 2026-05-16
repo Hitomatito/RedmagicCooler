@@ -38,6 +38,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.content.edit
+import kotlin.math.abs
 
 /**
  * Servicio de primer plano para control automático del cooler
@@ -56,7 +57,6 @@ class CoolerService : Service() {
         const val ACTION_SET_DEVICE_TYPE = "com.hitomatito.redmagicooler.SET_DEVICE_TYPE"
         const val ACTION_USE_CONNECTED_DEVICE = "com.hitomatito.redmagicooler.ACTION_USE_CONNECTED_DEVICE"
         const val EXTRA_DEVICE_TYPE = "device_type"
-        const val EXTRA_SCAN_ALL = "scan_all_types"
         
         // SharedPreferences keys
         private const val PREFS_NAME = "cooler_service_prefs"
@@ -111,7 +111,7 @@ class CoolerService : Service() {
     
     // Caché para evitar logs repetitivos de dispositivos no cooler
     private val loggedDevicesCache = mutableMapOf<String, Long>()
-    private val LOG_CACHE_TIMEOUT_MS = 30000L // 30 segundos
+    private val logCacheTimeoutMs = 30000L // 30 segundos
     
     // Función para limpiar el caché de logs antiguos
     private fun cleanupLogCache() {
@@ -406,6 +406,7 @@ class CoolerService : Service() {
      * Según el logcat de la app original, se escribe 0x00 para cambiar el modo
      * Este método NO desconecta el dispositivo, solo cambia el modo de operación
      */
+    @Suppress("DEPRECATION")
     private fun switchToManualMode() {
         if (!isConnected || bluetoothGatt == null) {
             Log.w(TAG, "No se puede cambiar a modo manual: dispositivo no conectado")
@@ -428,9 +429,7 @@ class CoolerService : Service() {
             @SuppressLint("MissingPermission")
             val success = autoModeCharacteristic?.let { characteristic ->
                 // Escribir comando según app original: 0x00 para cambiar modo
-                @Suppress("DEPRECATION")
-                characteristic.setValue(byteArrayOf(CoolerBleConstants.AUTO_MODE_COMMAND))
-                @Suppress("DEPRECATION")
+                characteristic.value = byteArrayOf(CoolerBleConstants.AUTO_MODE_COMMAND)
                 val result = bluetoothGatt?.writeCharacteristic(characteristic) ?: false
                 Log.d(TAG, "Comando de cambio a modo manual enviado. Resultado: $result")
                 result
@@ -508,7 +507,6 @@ class CoolerService : Service() {
         )
         
         // Determinar emoji y mensaje según el contexto
-        val statusEmoji: String
         val title: String
         val contentText: String
         
@@ -516,12 +514,11 @@ class CoolerService : Service() {
         if (status.contains("Error") || status.contains("Esperando") || 
             status.contains("Buscando") || status.contains("Conectando") || 
             status.contains("Desconectado")) {
-            statusEmoji = "⚪"
             title = "Modo Automático"
             contentText = status
         } else {
             // Conectado y funcionando
-            statusEmoji = when (status) {
+            val statusEmoji = when (status) {
                 "Critico" -> "🔴"
                 "Caliente" -> "🟠"
                 "Tibio" -> "🟡"
@@ -572,7 +569,7 @@ class CoolerService : Service() {
     private fun updateNotificationIfNeeded(status: String, speed: Int, temp: Float, forceUpdate: Boolean = false) {
         val currentTime = System.currentTimeMillis()
         val speedChanged = speed != lastNotifiedSpeed
-        val tempChangedSignificantly = kotlin.math.abs(temp - lastNotifiedTemp) >= 1.0f
+        val tempChangedSignificantly = abs(temp - lastNotifiedTemp) >= 1.0f
         val timeLimitReached = currentTime - lastNotificationTime > 30000L
         
         // Actualizar si: 1) cambió velocidad, 2) temp cambió >1°C, 3) pasaron 30s, o 4) forzado
@@ -762,21 +759,24 @@ class CoolerService : Service() {
                     
                     // Diferenciar tipos de desconexión
                     val isIntentionalDisconnect = status == BluetoothGatt.GATT_SUCCESS
+                    val isLocalTermination = status == 22 // GATT_CONN_TERMINATE_LOCAL_HOST
                     val isOutOfRange = status == 8 || status == 19 || status == 133 // Códigos típicos de fuera de rango
-                    val isError = status != BluetoothGatt.GATT_SUCCESS && !isOutOfRange
-                    
                     when {
                         isIntentionalDisconnect -> {
                             Log.d(TAG, "Desconexión intencional, no reconectar")
                             return
                         }
+                        isLocalTermination -> {
+                            Log.w(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - conexión terminada por el stack BLE local")
+                            updateNotification("Reconectando...", 0, currentTemp)
+                            reconnectBackoffMs = 5000L // Backoff moderado para status 22
+                        }
                         isOutOfRange -> {
                             Log.w(TAG, "Dispositivo fuera de rango, pausando reintentos por 1 minuto")
                             reconnectBackoffMs = 60000L // 1 minuto
                         }
-
                         else -> {
-                            Log.e(TAG, "Error de conexión detectado")
+                            Log.e(TAG, "Error de conexión detectado, status: $status")
                         }
                     }
                     
@@ -1001,7 +1001,7 @@ class CoolerService : Service() {
             
             // Verificar si este dispositivo ya fue loggeado recientemente
             val lastLogTime = loggedDevicesCache[deviceAddress] ?: 0L
-            val shouldLog = (currentTime - lastLogTime) > LOG_CACHE_TIMEOUT_MS
+            val shouldLog = (currentTime - lastLogTime) > logCacheTimeoutMs
             
             if (shouldLog) {
                 Log.d(TAG, "Dispositivo encontrado: $deviceName ($deviceAddress) RSSI: $rssi")
@@ -1200,7 +1200,7 @@ class CoolerService : Service() {
                             
                             // Si la velocidad recomendada es significativamente diferente, aplicar ajuste inicial
                             val recommendedSpeed = thermalData.recommendedSpeed
-                            if (Math.abs(recommendedSpeed - currentSpeed) >= 15) {
+                            if (abs(recommendedSpeed - currentSpeed) >= 15) {
                                 logDebug("Aplicando ajuste inicial: $currentSpeed% → $recommendedSpeed%")
                                 setFanSpeed(recommendedSpeed)
                             } else {
@@ -1272,6 +1272,7 @@ class CoolerService : Service() {
         }
     }
     
+    @Suppress("DEPRECATION")
     private fun setFanSpeed(speed: Int) {
         if (!isConnected || bluetoothGatt == null) {
             logDebug("Saltando ajuste de velocidad: no conectado")
@@ -1288,10 +1289,8 @@ class CoolerService : Service() {
                     val rawValue = MainActivity.mapPercentToRaw(speed.coerceIn(0, 100))
                     val value = rawValue.toByte()
                     
-                    @Suppress("DEPRECATION")
-                    characteristic.setValue(byteArrayOf(value))
+                    characteristic.value = byteArrayOf(value)
                     
-                    @Suppress("DEPRECATION")
                     @SuppressLint("MissingPermission")
                     val result = bluetoothGatt?.writeCharacteristic(characteristic)
                     
@@ -1445,12 +1444,6 @@ class CoolerService : Service() {
         }
     }
     
-    private fun logVerbose(message: String) {
-        if (DEBUG) {
-            Log.v(TAG, message)
-        }
-    }
-    
     /**
      * Establece el color y efecto de luz RGB del cooler
      * @param effect Efecto de luz a aplicar
@@ -1458,6 +1451,7 @@ class CoolerService : Service() {
      * @param green Componente verde (0-255)
      * @param blue Componente azul (0-255)
      */
+    @Suppress("DEPRECATION")
     fun setRGBLight(effect: LightEffect, red: Int = 0, green: Int = 0, blue: Int = 0) {
         // CRÍTICO: Verificar estado completo antes de proceder
         if (!isConnected || lightCharacteristic == null || bluetoothGatt == null) {
@@ -1479,10 +1473,8 @@ class CoolerService : Service() {
                     blue.toByte()
                 )
                 
-                @Suppress("DEPRECATION")
-                lightCharacteristic?.setValue(command)
+                lightCharacteristic?.value = command
                 
-                @Suppress("DEPRECATION")
                 @SuppressLint("MissingPermission")
                 val result = bluetoothGatt?.writeCharacteristic(lightCharacteristic)
                 
@@ -1504,21 +1496,6 @@ class CoolerService : Service() {
             }
         }
     }
-    
-    /**
-     * Atajos para efectos comunes
-     */
-    fun setColorful() = setRGBLight(LightEffect.COLORFUL)
-    
-    fun setBreathFullColor() = setRGBLight(LightEffect.BREATH_FULLCOLOR)
-    
-    fun setBreathSingleColor(red: Int, green: Int, blue: Int) = 
-        setRGBLight(LightEffect.BREATH_SINGLE, red, green, blue)
-    
-    fun setAlwaysBright(red: Int, green: Int, blue: Int) = 
-        setRGBLight(LightEffect.ALWAYS_BRIGHT, red, green, blue)
-    
-    fun turnOffLight() = setRGBLight(LightEffect.ALWAYS_BRIGHT, 0, 0, 0)
     
     // Funciones de métricas de batería
     private fun initBatteryMetrics() {
