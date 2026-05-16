@@ -1,6 +1,11 @@
 package com.hitomatito.redmagicooler.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -33,7 +39,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.ProfileStatus
+import kotlinx.coroutines.delay
 
 /**
  * Pantalla principal (Home) que muestra las tarjetas de los perfiles de coolers
@@ -51,10 +60,19 @@ import com.hitomatito.redmagicooler.model.ProfileStatus
 @Composable
 fun HomeScreen(
     profiles: List<CoolerProfile>,
+    connectionError: String? = null,
+    onDismissError: () -> Unit = {},
     onProfileClick: (CoolerProfile) -> Unit,
     onAddDevice: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val showError = remember(connectionError) { connectionError != null }
+    LaunchedEffect(connectionError) {
+        if (connectionError != null) {
+            delay(8000L)
+            onDismissError()
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -87,36 +105,85 @@ fun HomeScreen(
             }
         }
     ) { paddingValues ->
-        if (profiles.isEmpty()) {
-            // Estado vacío - Invitar al usuario a agregar su primer dispositivo
-            EmptyStateContent(
-                onAddDevice = onAddDevice,
-                modifier = Modifier.padding(paddingValues)
-            )
-        } else {
-            // Lista de perfiles
-            LazyColumn(
-                modifier = modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(
-                    items = profiles,
-                    key = { it.id }
-                ) { profile ->
-                    ProfileCard(
-                        profile = profile,
-                        onClick = { onProfileClick(profile) }
-                    )
-                }
-                
-                // Espacio extra al final para el FAB
-                item {
-                    Spacer(modifier = Modifier.height(80.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            if (profiles.isEmpty()) {
+                EmptyStateContent(
+                    onAddDevice = onAddDevice,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                LazyColumn(
+                    modifier = modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(
+                        items = profiles,
+                        key = { it.id }
+                    ) { profile ->
+                        ProfileCard(
+                            profile = profile,
+                            onClick = { onProfileClick(profile) }
+                        )
+                    }
+                    item {
+                        Spacer(modifier = Modifier.height(80.dp))
+                    }
                 }
             }
+            
+            AnimatedVisibility(
+                visible = showError,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut()
+            ) {
+                ErrorBanner(
+                    message = connectionError ?: "",
+                    onDismiss = onDismissError
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ErrorBanner(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onDismiss),
+        shape = RoundedCornerShape(0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(24.dp)
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }

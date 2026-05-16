@@ -1,5 +1,10 @@
 package com.hitomatito.redmagicooler.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -16,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -50,6 +56,8 @@ fun AddDeviceScreen(
     isScanning: Boolean,
     isConnecting: Boolean,
     statusMessage: String,
+    connectionError: String? = null,
+    onDismissError: () -> Unit = {},
     onCancelScan: () -> Unit,
     onProfileCreated: (String) -> Unit,
     newlyCreatedProfileId: String?,
@@ -86,6 +94,19 @@ fun AddDeviceScreen(
                 .padding(paddingValues)
                 .padding(16.dp)
         ) {
+            // Banner de error animado
+            AnimatedVisibility(
+                visible = connectionError != null,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut()
+            ) {
+                ErrorBanner(
+                    message = connectionError ?: "",
+                    onDismiss = onDismissError,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+            
             // Estado de búsqueda/conexión
             if (isScanning || isConnecting) {
                 ScanningStateCard(
@@ -301,6 +322,45 @@ private fun HelpCard() {
                        "• Asegúrate de que el Bluetooth esté activado",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ErrorBanner(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onDismiss),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(24.dp)
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
             )
         }
     }
