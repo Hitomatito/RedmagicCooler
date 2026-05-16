@@ -3,6 +3,7 @@ package com.hitomatito.redmagicooler.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.core.content.edit
 import com.hitomatito.redmagicooler.CoolerDeviceType
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.CoolerProfileData
@@ -79,7 +80,7 @@ class ProfileRepository(context: Context) {
             _profiles.value.forEach { profile ->
                 jsonArray.put(profileToJson(profile))
             }
-            prefs.edit().putString(KEY_PROFILES, jsonArray.toString()).apply()
+            prefs.edit { putString(KEY_PROFILES, jsonArray.toString()) }
             Log.d(TAG, "Guardados ${_profiles.value.size} perfiles")
         } catch (e: Exception) {
             Log.e(TAG, "Error guardando perfiles: ${e.message}", e)
@@ -140,7 +141,7 @@ class ProfileRepository(context: Context) {
         // Si era el perfil activo, seleccionar otro
         if (_activeProfileId.value == profileId) {
             _activeProfileId.value = _profiles.value.firstOrNull()?.id
-            prefs.edit().putString(KEY_ACTIVE_PROFILE, _activeProfileId.value).apply()
+            prefs.edit { putString(KEY_ACTIVE_PROFILE, _activeProfileId.value) }
         }
         
         Log.d(TAG, "Perfil eliminado: ${profile?.displayName}")
@@ -165,7 +166,7 @@ class ProfileRepository(context: Context) {
      */
     fun setActiveProfile(profileId: String?) {
         _activeProfileId.value = profileId
-        prefs.edit().putString(KEY_ACTIVE_PROFILE, profileId).apply()
+        prefs.edit { putString(KEY_ACTIVE_PROFILE, profileId) }
         Log.d(TAG, "Perfil activo: $profileId")
     }
     

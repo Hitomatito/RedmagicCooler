@@ -23,19 +23,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-// BuildConfig simple para debug
-private object BuildConfig {
-    const val DEBUG = true // Cambiar a false para producción
-}
-
 /**
  * Monitor de temperatura del dispositivo para controlar el cooler
  */
 class ThermalMonitor(private val context: Context) {
     companion object {
         private const val TAG = "ThermalMonitor"
-        private const val DEFAULT_UPDATE_INTERVAL_MS = 60000L // Intervalo predeterminado recomendado: 1 minuto
-        
+
         // Rangos de temperatura (°C) para calibración automática
         const val TEMP_SAFE = 40        // < 40°C: Sin preocupación
         const val TEMP_WARM = 50        // 40-50°C: Calentamiento
@@ -50,15 +44,7 @@ class ThermalMonitor(private val context: Context) {
         private const val MIN_TIME_AT_SPEED = 30000L  // Tiempo mínimo en cada velocidad: 30 segundos
         private const val PROGRESSIVE_INCREASE_DELAY = 20000L // Espera entre incrementos: 20 segundos
     }
-    
-    // Intervalo configurable de actualización (en ms)
-    var updateIntervalMs: Long = DEFAULT_UPDATE_INTERVAL_MS
-        set(value) {
-            // Validar intervalo mínimo para evitar sobrecarga (mínimo 5 segundos)
-            field = value.coerceAtLeast(5000L)
-            Log.d(TAG, "Intervalo de actualización cambiado a ${field}ms")
-        }
-    
+
     private var monitoringJob: Job? = null
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
@@ -250,7 +236,7 @@ class ThermalMonitor(private val context: Context) {
         }
         
         // Leer solo de zonas térmicas válidas en caché
-        for ((zoneId, filePair) in thermalZoneCache) {
+        for ((_, filePair) in thermalZoneCache) {
             try {
                 val (tempFile, typeFile) = filePair
                 
@@ -342,16 +328,16 @@ class ThermalMonitor(private val context: Context) {
      * Con sistema de rampa progresiva y estabilización
      * 
      * Lógica de calibración:
-     * - < 40°C: 0% (apagado, no necesario)
-     * - 40-48°C: 25-50% (enfriamiento suave)
-     * - 48-50°C: 50-75% (enfriamiento activo)
-     * - 50-55°C: 75-100% (enfriamiento máximo)
-     * - > 55°C: 100% (emergencia)
+     * - < 40 °C: 0% (apagado, no necesario)
+     * - 40-48 °C: 25-50% (enfriamiento suave)
+     * - 48-50 °C: 50-75% (enfriamiento activo)
+     * - 50-55 °C: 75-100% (enfriamiento máximo)
+     * - > 55 °C: 100% (emergencia)
      * 
      * Sistema progresivo:
      * - La velocidad aumenta gradualmente en incrementos de 15%
      * - Se mantiene cada velocidad al menos 30 segundos para permitir enfriamiento
-     * - En emergencia (>60°C) se permite salto directo a máxima velocidad
+     * - En emergencia (>60 °C) se permite salto directo a máxima velocidad
      */
     private fun calculateRecommendedSpeed(temp: Float): Int {
         val currentTime = System.currentTimeMillis()
@@ -398,15 +384,15 @@ class ThermalMonitor(private val context: Context) {
         
         // RAMPA PROGRESIVA: Aumentar velocidad gradualmente
         
-        // Si necesitamos aumentar velocidad
+        // Sí necesitamos aumentar velocidad
         if (targetSpeed > lastRecommendedSpeed) {
             // Verificar si hemos esperado suficiente tiempo en la velocidad actual
             val timeAtSpeed = currentTime - timeAtCurrentSpeed
             val timeSinceLastIncrease = currentTime - lastSpeedIncreaseTime
             
             // Permitir incremento si:
-            // 1. Hemos esperado el tiempo mínimo en esta velocidad (30s)
-            // 2. Ha pasado el delay entre incrementos (20s)
+            // 1. Hemos esperado el tiempo mínimo en esta velocidad (30 s)
+            // 2. Ha pasado el delay entre incrementos (20 s)
             if (timeAtSpeed >= MIN_TIME_AT_SPEED && timeSinceLastIncrease >= PROGRESSIVE_INCREASE_DELAY) {
                 // Incrementar gradualmente
                 val nextSpeed = (lastRecommendedSpeed + SPEED_INCREMENT).coerceAtMost(targetSpeed)
@@ -427,13 +413,13 @@ class ThermalMonitor(private val context: Context) {
                     (MIN_TIME_AT_SPEED - timeAtSpeed) / 1000,
                     (PROGRESSIVE_INCREASE_DELAY - timeSinceLastIncrease) / 1000
                 )
-                if (BuildConfig.DEBUG && remainingTime > 0 && remainingTime % 10L == 0L) {
+                if (remainingTime > 0 && remainingTime % 10L == 0L) {
                     Log.d(TAG, "⏳ Esperando ${remainingTime}s antes del próximo incremento (actual: $lastRecommendedSpeed%, objetivo: $targetSpeed%)")
                 }
                 return lastRecommendedSpeed
             }
         }
-        // Si necesitamos reducir velocidad (temperatura bajando)
+        // Sí necesitamos reducir velocidad (temperatura bajando)
         else if (targetSpeed < lastRecommendedSpeed) {
             // Permitir reducción inmediata cuando la temperatura baja
             val speedDiff = lastRecommendedSpeed - targetSpeed
@@ -458,9 +444,9 @@ class ThermalMonitor(private val context: Context) {
      */
     fun getAdaptiveInterval(tempLevel: TempLevel): Long {
         return when (tempLevel) {
-            TempLevel.SAFE -> 45000L      // 45 segundos si seguro (reducido desde 60s)
+            TempLevel.SAFE -> 45000L      // 45 segundos si seguro (reducido desde 60 s)
             TempLevel.WARM -> 20000L      // 20 segundos si tibio (reducido desde 30s)
-            TempLevel.HOT -> 10000L       // 10 segundos si caliente (reducido desde 15s)
+            TempLevel.HOT -> 10000L       // 10 segundos si caliente (reducido desde 15 s)
             TempLevel.CRITICAL -> 5000L   // 5 segundos si crítico (sin cambio)
         }
     }

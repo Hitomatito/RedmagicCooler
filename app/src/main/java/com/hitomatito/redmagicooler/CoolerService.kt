@@ -428,6 +428,7 @@ class CoolerService : Service() {
             @SuppressLint("MissingPermission")
             val success = autoModeCharacteristic?.let { characteristic ->
                 // Escribir comando según app original: 0x00 para cambiar modo
+                @Suppress("DEPRECATION")
                 characteristic.setValue(byteArrayOf(CoolerBleConstants.AUTO_MODE_COMMAND))
                 @Suppress("DEPRECATION")
                 val result = bluetoothGatt?.writeCharacteristic(characteristic) ?: false
@@ -954,26 +955,30 @@ class CoolerService : Service() {
             }
         }
         
+        private fun handleCharacteristicData(characteristic: BluetoothGattCharacteristic) {
+            @Suppress("DEPRECATION")
+            val data = characteristic.value
+            if (data != null && data.isNotEmpty()) {
+                val rawSpeed = data[0].toInt() and 0xFF
+                val speedPercent = MainActivity.mapRawToPercent(rawSpeed)
+                
+                // Si estamos esperando una lectura para calibración inicial
+                if (currentSpeedFromRead == -1) {
+                    currentSpeedFromRead = speedPercent
+                    logDebug("Velocidad leída del cooler: $speedPercent% (raw: $rawSpeed)")
+                } else {
+                    // Lectura normal - actualizar velocidad actual
+                    currentSpeed = speedPercent
+                    logDebug("Velocidad actualizada: $speedPercent%")
+                }
+            }
+        }
+        
         @Suppress("DEPRECATION")
         @Deprecated("Deprecated in API 33")
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                @Suppress("DEPRECATION")
-                val data = characteristic.value
-                if (data != null && data.isNotEmpty()) {
-                    val rawSpeed = data[0].toInt() and 0xFF
-                    val speedPercent = MainActivity.mapRawToPercent(rawSpeed)
-                    
-                    // Si estamos esperando una lectura para calibración inicial
-                    if (currentSpeedFromRead == -1) {
-                        currentSpeedFromRead = speedPercent
-                        logDebug("Velocidad leída del cooler: $speedPercent% (raw: $rawSpeed)")
-                    } else {
-                        // Lectura normal - actualizar velocidad actual
-                        currentSpeed = speedPercent
-                        logDebug("Velocidad actualizada: $speedPercent%")
-                    }
-                }
+                handleCharacteristicData(characteristic)
             } else {
                 logDebug("Error leyendo characteristic: $status")
                 currentSpeedFromRead = -1 // Indicar error
@@ -981,8 +986,7 @@ class CoolerService : Service() {
         }
         
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            // Manejar cambios en características (notificaciones)
-            onCharacteristicRead(gatt, characteristic, BluetoothGatt.GATT_SUCCESS)
+            handleCharacteristicData(characteristic)
         }
     }
     
@@ -1284,6 +1288,7 @@ class CoolerService : Service() {
                     val rawValue = MainActivity.mapPercentToRaw(speed.coerceIn(0, 100))
                     val value = rawValue.toByte()
                     
+                    @Suppress("DEPRECATION")
                     characteristic.setValue(byteArrayOf(value))
                     
                     @Suppress("DEPRECATION")
@@ -1474,6 +1479,7 @@ class CoolerService : Service() {
                     blue.toByte()
                 )
                 
+                @Suppress("DEPRECATION")
                 lightCharacteristic?.setValue(command)
                 
                 @Suppress("DEPRECATION")
