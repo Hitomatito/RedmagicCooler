@@ -80,6 +80,10 @@ class MainActivity : ComponentActivity() {
     private var pendingDeviceMac by mutableStateOf<String?>(null)
     private var pendingDeviceName by mutableStateOf<String?>(null)
     private var pendingDeviceRssi by mutableIntStateOf(0)
+
+    // MAC concreta a la que conectar durante la reconexión de un perfil guardado.
+    // null = aceptar cualquier dispositivo cuyo nombre coincida (dispositivo nuevo).
+    private var scanTargetMac: String? = null
     
     // Perfil recién creado (para navegación automática)
     private var newlyCreatedProfileId by mutableStateOf<String?>(null)
@@ -320,7 +324,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onRenameProfile = { newName ->
                                     profileRepository.renameProfile(profileId, newName)
-                                }
+                                },
+                                connectionError = connectionError,
+                                onDismissError = { connectionError = null }
                             )
                         }
                     }
@@ -367,7 +373,11 @@ class MainActivity : ComponentActivity() {
      * Conecta a un perfil existente
      */
     @RequiresApi(Build.VERSION_CODES.S)
-    private fun connectToProfile(profile: CoolerProfile) {
+    private fun connectToProfile(profile: CoolerProfile, isRetry: Boolean = false) {
+        // Un intento manual empieza con el contador a cero; los reintentos automáticos no
+        if (!isRetry) {
+            status22ReconnectAttempts = 0
+        }
         if (!bluetoothAdapter.isEnabled) {
             statusMessage = "Bluetooth desactivado"
             Toast.makeText(this, "Por favor, activa Bluetooth primero", Toast.LENGTH_SHORT).show()
@@ -386,14 +396,11 @@ class MainActivity : ComponentActivity() {
         
         pendingConnectionProfileId = profile.id
         pendingNewDeviceType = profile.deviceType
-        
-        // Intentar conectar directamente por MAC si la conocemos
-        if (profile.macAddress.isNotBlank()) {
-            connectDirectlyByMac(profile.macAddress, profile.deviceType)
-        } else {
-            // Escanear para encontrar el dispositivo
-            startScanForDevice(profile.deviceType)
-        }
+
+        // Escanear antes de conectar, como la app oficial: el dispositivo obtenido
+        // por escaneo tiene el tipo de dirección BLE resuelto y el discovery responde.
+        scanTargetMac = profile.macAddress.ifBlank { null }
+        startScanForDevice(profile.deviceType)
     }
 
     /**
@@ -420,7 +427,7 @@ class MainActivity : ComponentActivity() {
             
             bluetoothGatt = device.connectGatt(
                 this,
-                true,
+                false,  // Conexión directa: autoConnect=true ralentiza el descubrimiento de servicios
                 gattCallback,
                 BluetoothDevice.TRANSPORT_LE
             )
@@ -459,6 +466,7 @@ class MainActivity : ComponentActivity() {
         
         pendingNewDeviceType = deviceType
         pendingConnectionProfileId = null // Es un nuevo dispositivo
+        scanTargetMac = null
         startScanForDevice(deviceType)
     }
 
@@ -546,6 +554,7 @@ class MainActivity : ComponentActivity() {
             isScanning = false
         }
         isConnecting = false
+        scanTargetMac = null
         statusMessage = "Escaneo cancelado"
     }
     
@@ -577,6 +586,12 @@ class MainActivity : ComponentActivity() {
             val serviceUuids = result.scanRecord?.serviceUuids?.joinToString(", ") { it.toString() } ?: "ninguno"
             Log.d(TAG, "BLE Device: $deviceName [${device.address}] RSSI: ${result.rssi} dBm")
             Log.d(TAG, "   UUIDs: $serviceUuids")
+
+            // Al reconectar un perfil, ignorar otros coolers del mismo modelo
+            val targetMac = scanTargetMac
+            if (targetMac != null && !device.address.equals(targetMac, ignoreCase = true)) {
+                return
+            }
             
             val isNameMatch = deviceName.contains("Magcooler", ignoreCase = true) || 
                               deviceName.contains("RM ", ignoreCase = true) ||
@@ -646,7 +661,9 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleDiscoverServicesTimeout() {
         discoveryTimeoutJob = null
-        val profileId = currentConnectedProfileId
+        // Tras una desconexión manual currentConnectedProfileId es null, pero el
+        // perfil pendiente permite reintentar (como hace la app oficial).
+        val profileId = currentConnectedProfileId ?: pendingConnectionProfileId
         BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
         bluetoothGatt = null
         fanCharacteristic = null
@@ -659,6 +676,7 @@ class MainActivity : ComponentActivity() {
             status22ReconnectAttempts++
             val attempt = status22ReconnectAttempts
             Log.w(TAG, "Reintentando conexión tras timeout ($attempt/$maxStatus22Reconnects)...")
+            connectionError = "El cooler no responde.\nReintentando ($attempt/$maxStatus22Reconnects)..."
             val backoffMs = 2000L
             monitoringScope.launch {
                 delay(backoffMs)
@@ -667,7 +685,7 @@ class MainActivity : ComponentActivity() {
                     val profile = profileRepository.getProfile(profileId)
                     if (profile != null) {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            connectToProfile(profile)
+                            connectToProfile(profile, isRetry = true)
                         } else {
                             Log.w(TAG, "API level insuficiente para reconectar tras timeout")
                             statusMessage = "Error: API no compatible para reconexión"
@@ -681,6 +699,8 @@ class MainActivity : ComponentActivity() {
             }
         } else {
             statusMessage = "Error: tiempo de conexión agotado"
+            connectionError = "El cooler no responde al conectar.\n" +
+                "Desactiva y activa el Bluetooth del teléfono y vuelve a pulsar Conectar."
             currentConnectedProfileId?.let { pid ->
                 profileRepository.updateConnectionState(pid, false)
             }
@@ -690,6 +710,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun processDiscoveredServices(gatt: BluetoothGatt, services: List<BluetoothGattService>) {
+        // El discovery respondió: la conexión es válida y se resetea el contador de reintentos
+        status22ReconnectAttempts = 0
         if (services.isEmpty() && discoveryRetryCount < maxDiscoveryRetries) {
             discoveryRetryCount++
             Log.w(TAG, "Lista de servicios vacia - Reintentando discovery ($discoveryRetryCount/$maxDiscoveryRetries)...")
@@ -815,9 +837,18 @@ class MainActivity : ComponentActivity() {
             currentConnectedProfileId?.let { profileId ->
                 profileRepository.updateConnectionState(profileId, false)
             }
-            
-            BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
+
+            // Desconectar y dejar que el callback STATE_DISCONNECTED cierre el cliente.
+            // Cerrar antes de que el stack confirme deja el siguiente discovery sin respuesta.
+            val gatt = bluetoothGatt
             bluetoothGatt = null
+            if (gatt != null) {
+                try {
+                    gatt.disconnect()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error al desconectar: ${e.message}")
+                }
+            }
             fanCharacteristic = null
             lightCharacteristic = null
             isConnected = false
@@ -849,7 +880,7 @@ class MainActivity : ComponentActivity() {
                         isConnected = true
                         connectionError = null
                         discoveryRetryCount = 0
-                        status22ReconnectAttempts = 0
+                        scanTargetMac = null
                         statusMessage = "Conectado, preparando..."
                         Log.d(TAG, "Conectado al cooler exitosamente")
                         Log.d(TAG, "   Device: ${gatt.device.address}")
@@ -859,9 +890,10 @@ class MainActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         
-                        // Delay para dar tiempo al cooler antes de descubrir servicios
+                        // Delay mínimo antes de descubrir servicios (la app oficial lo
+                        // hace ~14 ms tras el callback; 800 ms daba ventaja al stack)
                         monitoringScope.launch {
-                            delay(800L)
+                            delay(100L)
                             if (isFinishing || isDestroyed || !isConnected) return@launch
                             
                             runOnUiThread {
@@ -881,13 +913,14 @@ class MainActivity : ComponentActivity() {
                                         Log.d(TAG, "Iniciando descubrimiento de servicios...")
                                         gatt.discoverServices()
                                         
-                                        // Timeout watchdog: si discoverServices no responde en 15s, reconectar
+                                        // Timeout watchdog: si discoverServices no responde en 10s, reconectar.
+                                        // Un discovery sano tarda <2 s; 30 s de espera solo alarga el fallo.
                                         discoveryTimeoutJob?.cancel()
                                         discoveryTimeoutJob = monitoringScope.launch {
-                                            delay(15000L)
+                                            delay(10000L)
                                             if (isFinishing || isDestroyed || !isDiscoveryInProgress) return@launch
                                             runOnUiThread {
-                                                Log.w(TAG, "⚠️ discoverServices() timeout - sin respuesta en 15s")
+                                                Log.w(TAG, "⚠️ discoverServices() timeout - sin respuesta en 10s")
                                                 statusMessage = "Tiempo de espera agotado, reintentando..."
                                                 isDiscoveryInProgress = false
                                                 isDiscoveryTimedOut = true
@@ -899,6 +932,8 @@ class MainActivity : ComponentActivity() {
                                                     }
                                                 } catch (e: SecurityException) {
                                                     Log.e(TAG, "SecurityException al desconectar por timeout: ${e.message}")
+                                                    // No habrá callback STATE_DISCONNECTED: manejar aquí y limpiar el flag
+                                                    isDiscoveryTimedOut = false
                                                     handleDiscoverServicesTimeout()
                                                 }
                                             }
@@ -917,6 +952,16 @@ class MainActivity : ComponentActivity() {
                         isConnecting = false
                         discoveryTimeoutJob?.cancel()
                         discoveryTimeoutJob = null
+
+                        // Liberar siempre el cliente GATT desconectado: los clientes
+                        // huérfanos dejan bearers ATT colgados y rompen el siguiente
+                        // service discovery.
+                        try {
+                            gatt.close()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error cerrando GATT desconectado: ${e.message}")
+                        }
+                        if (bluetoothGatt === gatt) bluetoothGatt = null
                         
                         // TIMEOUT DE DISCOVERY: Si el timeout watchdog disparó la desconexión,
                         // manejamos el reintento aquí para evitar que el flujo normal lo sobreescriba
@@ -932,10 +977,13 @@ class MainActivity : ComponentActivity() {
                         // Estrategia: auto-reconectar con backoff progresivo hasta maxStatus22Reconnects.
                         if (status == 22) {
                             connectionError = "Se perdió la conexión. Reintentando..."
-                            if (status22ReconnectAttempts < maxStatus22Reconnects && currentConnectedProfileId != null) {
+                            // currentConnectedProfileId es null antes del primer discovery,
+                            // pero el perfil pendiente permite reintentar igual que la app oficial
+                            val profileIdForRetry = currentConnectedProfileId ?: pendingConnectionProfileId
+                            if (status22ReconnectAttempts < maxStatus22Reconnects && profileIdForRetry != null) {
                                 status22ReconnectAttempts++
                                 isDiscoveryInProgress = false
-                                val profileId = currentConnectedProfileId
+                                val profileId = profileIdForRetry
                                 val attempt = status22ReconnectAttempts
                                 Log.w(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - Reintentando ($attempt/$maxStatus22Reconnects)...")
                                 statusMessage = "Reconectando (intento $attempt)..."
@@ -951,7 +999,7 @@ class MainActivity : ComponentActivity() {
                                         val profile = profileId?.let { profileRepository.getProfile(it) }
                                         if (profile != null) {
                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                                connectToProfile(profile)
+                                                connectToProfile(profile, isRetry = true)
                                             } else {
                                                 Log.w(TAG, "API level insuficiente para reconectar tras status 22")
                                                 statusMessage = "Error: API no compatible para reconexión"
@@ -967,6 +1015,10 @@ class MainActivity : ComponentActivity() {
                             }
                             status22ReconnectAttempts = 0
                             Log.e(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - Reintentos agotados")
+                            // Fallo conocido del cooler: deja de responder al discovery hasta
+                            // que se reinicia el Bluetooth del teléfono
+                            connectionError = "El cooler no responde al conectar.\n" +
+                                "Desactiva y activa el Bluetooth del teléfono y vuelve a pulsar Conectar."
                         }
                         
                         // Si estamos en medio de un reintento de discovery, no procesar desconexión

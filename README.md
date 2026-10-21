@@ -77,6 +77,14 @@ Y ejecuta `./gradlew assembleRelease`.
 - **Notificaciones** — estado del servicio en primer plano
 - **Alarmas exactas** — ajustes programados
 
+### Reconexión tras desconectar
+
+Algunos Heat Sink dejan de responder al descubrimiento de servicios después de una desconexión. El enlace BLE se establece, pero el cooler no contesta a las peticiones ATT y Android termina la conexión con `status 22` a los ~30 s.
+
+Está comprobado que ocurre igual con la app oficial de Nubia, así que es una limitación del firmware del cooler o del stack Bluetooth del teléfono, no de esta app.
+
+**Solución:** desactiva y vuelve a activar el Bluetooth del teléfono, después pulsa **Conectar**. La app reintenta hasta tres veces antes de mostrar este aviso.
+
 ## Cómo funciona
 
 El protocolo BLE está obtenido por **ingeniería inversa del logcat de la app oficial**: UUIDs de servicio y características, tramas de velocidad, modo automático y comandos RGB.
