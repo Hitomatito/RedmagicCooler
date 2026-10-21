@@ -116,3 +116,5 @@ MIT. Consulta [LICENSE](LICENSE).
 ---
 
 Proyecto no oficial. No está afiliado a Nubia, RedMagic ni ZTE.
+
+Las imágenes de producto de los coolers son propiedad de Nubia/RedMagic y se usan únicamente para identificar los modelos compatibles dentro de la app.

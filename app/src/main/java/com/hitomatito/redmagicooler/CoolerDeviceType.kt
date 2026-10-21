@@ -10,62 +10,71 @@ enum class CoolerDeviceType(
     val deviceName: String,
     val advertisingUUID: UUID,
     val generation: Int,
-    val description: String
+    val description: String,
+    val imageRes: Int
 ) {
     JACKET_1(
         deviceName = "Enfriador Doble Núcleo",
         advertisingUUID = UUID.fromString("70e03463-0478-4596-a826-e0002d27618a"),
         generation = 1,
-        description = "Primera generación de enfriadores RedMagic"
+        description = "Primera generación de enfriadores RedMagic",
+        imageRes = R.drawable.cooler_dual_core
     ),
     
     JACKET_2(
         deviceName = "Enfriador Turbo",
         advertisingUUID = UUID.fromString("3823dac1-f7be-4a11-a145-83b2b2f35e5e"),
         generation = 2,
-        description = "Segunda generación con mejoras de rendimiento"
+        description = "Segunda generación con mejoras de rendimiento",
+        imageRes = R.drawable.cooler_turbo
     ),
     
     JACKET_3(
         deviceName = "Magcooler",
         advertisingUUID = UUID.fromString("85e1fd9d-7ca1-4be3-8131-1edde011a47d"),
         generation = 3,
-        description = "Tercera generación con diseño optimizado"
+        description = "Tercera generación con diseño optimizado",
+        imageRes = R.drawable.cooler_magcooler
     ),
     
     JACKET_4(
         deviceName = "Heat Sink 4 Pro",
         advertisingUUID = UUID.fromString("1e3f2686-e85f-4c25-8dd3-ff6164d46a16"),
         generation = 4,
-        description = "Cuarta generación profesional"
+        description = "Cuarta generación profesional",
+        imageRes = R.drawable.cooler_heat_sink_4_pro
     ),
     
     JACKET_5(
         deviceName = "Heat Sink 5 Pro",
         advertisingUUID = UUID.fromString("b739be84-9cca-44ed-8653-4e4c7f16a9a4"),
         generation = 5,
-        description = "Quinta generación con control RGB avanzado"
+        description = "Quinta generación con control RGB avanzado",
+        imageRes = R.drawable.cooler_heat_sink_5_pro
     ),
     
     JACKET_5_LITE(
         deviceName = "Heat Sink 5 Lite",
         advertisingUUID = UUID.fromString("a8f345b9-d726-4707-910a-fd637c2b00a7"),
         generation = 5,
-        description = "Versión compacta de quinta generación"
+        description = "Versión compacta de quinta generación",
+        imageRes = R.drawable.cooler_heat_sink_5
     ),
     
     JACKET_6(
         deviceName = "Heat Sink 6",
         advertisingUUID = UUID.fromString("e39bc7af-ca69-4977-9fe7-ae3ad560f063"),
         generation = 6,
-        description = "Sexta generación con eficiencia mejorada"
+        description = "Sexta generación con eficiencia mejorada",
+        imageRes = R.drawable.cooler_heat_sink_6
     ),
     
     JACKET_6_PRO(
         deviceName = "Heat Sink 6 Pro",
         advertisingUUID = UUID.fromString("9c24a801-7666-40c1-9589-26a89425a0b0"),
         generation = 6,
-        description = "Versión profesional de sexta generación"
+        description = "Versión profesional de sexta generación",
+        imageRes = R.drawable.cooler_heat_sink_6_pro
     );
 
     companion object {
