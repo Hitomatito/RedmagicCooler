@@ -200,6 +200,8 @@ class MainActivity : ComponentActivity() {
 
     @RequiresApi(Build.VERSION_CODES.S)
     override fun onCreate(savedInstanceState: Bundle?) {
+        // El tema Splash solo se usa durante el arranque; después pasamos al tema normal.
+        setTheme(R.style.Theme_RedmagiCooler)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
