@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# WorkManager instantiates workers by class name.
+-keep class * extends androidx.work.ListenableWorker { *; }
+
+# Keep line numbers so release crash reports are readable.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

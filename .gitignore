@@ -15,3 +15,8 @@
 local.properties
 .idea/vcs.xml
 .idea/.name
+
+# Release signing
+keystore.properties
+*.jks
+*.keystore
