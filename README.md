@@ -16,7 +16,7 @@ La app identifica cada modelo por su UUID de advertising BLE.
 | 2 | Enfriador Turbo |
 | 3 | Magcooler |
 | 4 | Heat Sink 4 Pro |
-| 5 | Heat Sink 5 Pro · Heat Sink 5 Lite |
+| 5 | Heat Sink 5 Pro · Heat Sink 5 |
 | 6 | Heat Sink 6 · Heat Sink 6 Pro |
 
 Probado en el **Heat Sink 5 Pro**. El resto de modelos están soportados por UUID, pero no verificados en hardware.

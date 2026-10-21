@@ -54,10 +54,10 @@ enum class CoolerDeviceType(
     ),
     
     JACKET_5_LITE(
-        deviceName = "Heat Sink 5 Lite",
+        deviceName = "Heat Sink 5",
         advertisingUUID = UUID.fromString("a8f345b9-d726-4707-910a-fd637c2b00a7"),
         generation = 5,
-        description = "Versión compacta de quinta generación",
+        description = "Quinta generación, versión estándar",
         imageRes = R.drawable.cooler_heat_sink_5
     ),
     
