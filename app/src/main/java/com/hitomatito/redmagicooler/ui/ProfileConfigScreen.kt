@@ -1,5 +1,6 @@
 package com.hitomatito.redmagicooler.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -54,9 +55,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -219,8 +223,8 @@ fun ProfileConfigScreen(
                 )
             }
 
-            // Estado de conexión
-            ConnectionCard(
+            // Imagen del modelo y estado de conexión
+            ProfileHeroCard(
                 profile = profile,
                 onConnect = onConnect,
                 onDisconnect = onDisconnect
@@ -260,85 +264,114 @@ fun ProfileConfigScreen(
 }
 
 /**
- * Tarjeta de estado de conexión.
+ * Tarjeta principal del perfil: imagen grande del cooler y estado de conexión.
  */
 @Composable
-private fun ConnectionCard(
+private fun ProfileHeroCard(
     profile: CoolerProfile,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
     val isInAutoMode = profile.isAutoMode
     val connected = profile.isConnected
+    val glowColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        Column {
             Box(
                 modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (connected || isInAutoMode) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.outline
-                        }
-                    )
-            )
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                Text(
-                    text = when {
-                        isInAutoMode && connected -> "Modo automático"
-                        isInAutoMode -> "Modo automático · reconectando"
-                        connected -> "Conectado"
-                        else -> "Desconectado"
+                    .fillMaxWidth()
+                    .height(232.dp)
+                    .drawBehind {
+                        drawRect(
+                            brush = Brush.radialGradient(
+                                colors = listOf(glowColor, Color.Transparent),
+                                center = center,
+                                radius = size.minDimension * 0.75f
+                            )
+                        )
                     },
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = if (isInAutoMode) "Servicio en segundo plano" else profile.macAddress,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(profile.deviceType.imageRes),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 32.dp, vertical = 16.dp)
                 )
             }
 
-            when {
-                isInAutoMode -> Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.tertiaryContainer
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (connected || isInAutoMode) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outline
+                            }
+                        )
+                )
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     Text(
-                        text = "AUTO",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        text = when {
+                            isInAutoMode && connected -> "Modo automático"
+                            isInAutoMode -> "Modo automático · reconectando"
+                            connected -> "Conectado"
+                            else -> "Desconectado"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (isInAutoMode) "Servicio en segundo plano" else profile.macAddress,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                connected -> OutlinedButton(onClick = onDisconnect) {
-                    Text("Desconectar")
-                }
+                when {
+                    isInAutoMode -> Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.tertiaryContainer
+                    ) {
+                        Text(
+                            text = "AUTO",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
 
-                else -> Button(onClick = onConnect) {
-                    Text("Conectar")
+                    connected -> OutlinedButton(onClick = onDisconnect) {
+                        Text("Desconectar")
+                    }
+
+                    else -> Button(onClick = onConnect) {
+                        Text("Conectar")
+                    }
                 }
             }
         }

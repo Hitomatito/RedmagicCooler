@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -44,10 +45,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.hitomatito.redmagicooler.CoolerDeviceType
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import kotlinx.coroutines.delay
 
@@ -226,14 +233,18 @@ private fun ProfileCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
-                        .size(52.dp)
-                        .clip(MaterialTheme.shapes.medium)
+                        .size(72.dp)
+                        .clip(MaterialTheme.shapes.large)
                         .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = profile.icon,
-                        style = MaterialTheme.typography.titleLarge
+                    Image(
+                        painter = painterResource(profile.deviceType.imageRes),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(4.dp)
                     )
                 }
 
@@ -351,14 +362,31 @@ private fun EmptyStateContent(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
+        val glowColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
         Box(
             modifier = Modifier
-                .size(96.dp)
+                .size(184.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                .drawBehind {
+                    drawRect(
+                        brush = Brush.radialGradient(
+                            colors = listOf(glowColor, Color.Transparent),
+                            center = center,
+                            radius = size.minDimension * 0.7f
+                        )
+                    )
+                },
             contentAlignment = Alignment.Center
         ) {
-            Text(text = "❄️", style = MaterialTheme.typography.headlineLarge)
+            Image(
+                painter = painterResource(CoolerDeviceType.JACKET_5.imageRes),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp)
+            )
         }
 
         Spacer(modifier = Modifier.height(24.dp))
