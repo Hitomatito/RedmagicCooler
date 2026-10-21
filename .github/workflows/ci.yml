@@ -26,9 +26,6 @@ jobs:
           java-version: '21'
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install SDK packages
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
