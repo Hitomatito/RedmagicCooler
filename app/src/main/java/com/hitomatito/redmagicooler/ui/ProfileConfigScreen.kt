@@ -1,6 +1,9 @@
 package com.hitomatito.redmagicooler.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -22,7 +26,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -30,6 +38,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -43,10 +53,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.ThermalMonitor
 import com.hitomatito.redmagicooler.model.CoolerProfile
+import com.hitomatito.redmagicooler.model.LightEffect
 import kotlinx.coroutines.delay
 
 /**
@@ -181,8 +197,8 @@ fun ProfileConfigScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         }
@@ -190,8 +206,8 @@ fun ProfileConfigScreen(
         Column(
             modifier = modifier
                 .fillMaxSize()
-                .verticalScroll(scrollState)
                 .padding(paddingValues)
+                .verticalScroll(scrollState)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -212,41 +228,10 @@ fun ProfileConfigScreen(
 
             // Control RGB (disponible si está conectado)
             if (profile.isConnected || profile.isAutoMode) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "Control de Iluminación RGB",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        
-                        profile.rgbConfig?.let { rgb ->
-                            Text(
-                                text = "Efecto actual: ${rgb.effect.name}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                        }
-                        
-                        Button(
-                            onClick = onNavigateToRGB,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            )
-                        ) {
-                            Text("Configurar RGB")
-                        }
-                    }
-                }
+                RgbCard(
+                    profile = profile,
+                    onNavigateToRGB = onNavigateToRGB
+                )
             }
 
             // Monitor térmico
@@ -275,7 +260,7 @@ fun ProfileConfigScreen(
 }
 
 /**
- * Tarjeta de estado de conexión
+ * Tarjeta de estado de conexión.
  */
 @Composable
 private fun ConnectionCard(
@@ -284,84 +269,75 @@ private fun ConnectionCard(
     onDisconnect: () -> Unit
 ) {
     val isInAutoMode = profile.isAutoMode
-    val displayStatus = when {
-        isInAutoMode && profile.isConnected -> "Modo Automatico Activo"
-        isInAutoMode && !profile.isConnected -> "Modo Automatico (Reconectando...)"
-        profile.isConnected -> "Conectado (Manual)"
-        else -> "Desconectado"
-    }
-    val statusColor = when {
-        isInAutoMode -> MaterialTheme.colorScheme.tertiaryContainer
-        profile.isConnected -> MaterialTheme.colorScheme.primaryContainer
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-    
+    val connected = profile.isConnected
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = statusColor
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Column {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (connected || isInAutoMode) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outline
+                        }
+                    )
+            )
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = when {
+                        isInAutoMode && connected -> "Modo automático"
+                        isInAutoMode -> "Modo automático · reconectando"
+                        connected -> "Conectado"
+                        else -> "Desconectado"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = if (isInAutoMode) "Servicio en segundo plano" else profile.macAddress,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            when {
+                isInAutoMode -> Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.tertiaryContainer
                 ) {
                     Text(
-                        text = when {
-                            isInAutoMode && profile.isConnected -> "●"
-                            isInAutoMode -> "●"
-                            profile.isConnected -> "●"
-                            else -> "○"
-                        },
-                        style = MaterialTheme.typography.titleLarge
+                        text = "AUTO",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     )
-                    Column {
-                        Text(
-                            text = displayStatus.substringAfter(" "),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        if (isInAutoMode) {
-                            Text(
-                                text = "Gestionado por servicio en segundo plano",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Text(
-                            text = profile.macAddress,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
-            }
-            
-            if (isInAutoMode) {
-                // En modo automático, no mostrar botones de conexión manual
-                Text(
-                    text = "AUTO",
-                    style = MaterialTheme.typography.headlineMedium
-                )
-            } else if (profile.isConnected) {
-                Button(
-                    onClick = onDisconnect,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
+
+                connected -> OutlinedButton(onClick = onDisconnect) {
                     Text("Desconectar")
                 }
-            } else {
-                Button(onClick = onConnect) {
+
+                else -> Button(onClick = onConnect) {
                     Text("Conectar")
                 }
             }
@@ -370,7 +346,100 @@ private fun ConnectionCard(
 }
 
 /**
- * Tarjeta de monitor térmico
+ * Tarjeta de iluminación RGB con vista previa del color actual.
+ */
+@Composable
+private fun RgbCard(
+    profile: CoolerProfile,
+    onNavigateToRGB: () -> Unit
+) {
+    val rgb = profile.rgbConfig
+    val previewColor = if (rgb != null) {
+        Color(rgb.red, rgb.green, rgb.blue)
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    val previewBrush = when {
+        rgb == null -> SolidColor(previewColor)
+        rgb.effect == LightEffect.COLORFUL || rgb.effect == LightEffect.BREATH_FULLCOLOR ->
+            Brush.sweepGradient(
+                listOf(
+                    Color(0xFFE53935),
+                    Color(0xFFFB8C00),
+                    Color(0xFFFDD835),
+                    Color(0xFF43A047),
+                    Color(0xFF1E88E5),
+                    Color(0xFF8E24AA),
+                    Color(0xFFE53935)
+                )
+            )
+
+        else -> SolidColor(previewColor)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            if (rgb != null) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(previewBrush)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "RGB",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "Iluminación RGB",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = rgb?.let { effectName(it.effect) } ?: "Sin configurar",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            FilledTonalButton(onClick = onNavigateToRGB) {
+                Text("Configurar")
+            }
+        }
+    }
+}
+
+/**
+ * Monitor térmico con interruptor de modo automático.
  */
 @Composable
 private fun ThermalCard(
@@ -379,83 +448,135 @@ private fun ThermalCard(
     isConnecting: Boolean,
     onToggleAutoMode: () -> Unit
 ) {
+    val hasTemperature = thermalData.maxTemp > 0f
+
+    val levelLabel = when (thermalData.tempLevel) {
+        ThermalMonitor.TempLevel.SAFE -> "Normal"
+        ThermalMonitor.TempLevel.WARM -> "Templado"
+        ThermalMonitor.TempLevel.HOT -> "Alta"
+        ThermalMonitor.TempLevel.CRITICAL -> "Crítica"
+    }
+
+    val chipColor = when (thermalData.tempLevel) {
+        ThermalMonitor.TempLevel.SAFE -> MaterialTheme.colorScheme.secondaryContainer
+        ThermalMonitor.TempLevel.WARM -> MaterialTheme.colorScheme.tertiaryContainer
+        ThermalMonitor.TempLevel.HOT -> MaterialTheme.colorScheme.errorContainer
+        ThermalMonitor.TempLevel.CRITICAL -> MaterialTheme.colorScheme.error
+    }
+    val chipContent = when (thermalData.tempLevel) {
+        ThermalMonitor.TempLevel.SAFE -> MaterialTheme.colorScheme.onSecondaryContainer
+        ThermalMonitor.TempLevel.WARM -> MaterialTheme.colorScheme.onTertiaryContainer
+        ThermalMonitor.TempLevel.HOT -> MaterialTheme.colorScheme.onErrorContainer
+        ThermalMonitor.TempLevel.CRITICAL -> MaterialTheme.colorScheme.onError
+    }
+    val tempColor = when (thermalData.tempLevel) {
+        ThermalMonitor.TempLevel.SAFE -> MaterialTheme.colorScheme.onSurface
+        ThermalMonitor.TempLevel.WARM -> MaterialTheme.colorScheme.tertiary
+        ThermalMonitor.TempLevel.HOT,
+        ThermalMonitor.TempLevel.CRITICAL -> MaterialTheme.colorScheme.error
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = when (thermalData.tempLevel) {
-                ThermalMonitor.TempLevel.SAFE -> MaterialTheme.colorScheme.surfaceVariant
-                ThermalMonitor.TempLevel.WARM -> MaterialTheme.colorScheme.tertiaryContainer
-                ThermalMonitor.TempLevel.HOT -> MaterialTheme.colorScheme.errorContainer
-                ThermalMonitor.TempLevel.CRITICAL -> MaterialTheme.colorScheme.error
-            }
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
     ) {
         Column(
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Monitor Termico",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Button(
-                    onClick = onToggleAutoMode,
-                    enabled = !isConnecting,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isAutoMode) 
-                            MaterialTheme.colorScheme.primary 
-                        else 
-                            MaterialTheme.colorScheme.secondary
+                Column {
+                    Text(
+                        text = "Temperatura",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
                     )
+                    Text(
+                        text = "Monitor térmico",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(if (isAutoMode) "Auto ON" else "Auto OFF")
+                    Text(
+                        text = "Auto",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (isAutoMode) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                    Switch(
+                        checked = isAutoMode,
+                        onCheckedChange = { onToggleAutoMode() },
+                        enabled = !isConnecting
+                    )
                 }
             }
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
+
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Temperatura:", style = MaterialTheme.typography.bodyMedium)
+                if (hasTemperature) {
                     Text(
                         text = "${"%.1f".format(thermalData.maxTemp)}°C",
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold
+                        style = MaterialTheme.typography.displaySmall,
+                        color = tempColor
                     )
+                    Surface(
+                        shape = CircleShape,
+                        color = chipColor
+                    ) {
+                        Text(
+                            text = levelLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = chipContent,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                } else {
                     Text(
-                        text = when (thermalData.tempLevel) {
-                            ThermalMonitor.TempLevel.SAFE -> "Normal"
-                            ThermalMonitor.TempLevel.WARM -> "Calentamiento"
-                            ThermalMonitor.TempLevel.HOT -> "Alta"
-                            ThermalMonitor.TempLevel.CRITICAL -> "Critica"
-                        },
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("Velocidad Sugerida:", style = MaterialTheme.typography.bodySmall)
-                    Text(
-                        text = "${thermalData.recommendedSpeed}%",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
+                        text = "Sin datos",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
-            
-            if (isAutoMode) {
-                Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "Ajuste automatico activo",
+                    text = "Velocidad sugerida",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = if (hasTemperature) "${thermalData.recommendedSpeed}%" else "—",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            if (isAutoMode) {
+                Text(
+                    text = "El servicio ajusta la velocidad automáticamente",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -463,7 +584,7 @@ private fun ThermalCard(
 }
 
 /**
- * Tarjeta de control de velocidad
+ * Control de velocidad manual con presets rápidos.
  */
 @Composable
 private fun SpeedControlCard(
@@ -473,100 +594,90 @@ private fun SpeedControlCard(
     onSpeedChange: (Int) -> Unit,
     onSetSpeed: (Int) -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(20.dp)) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = if (isAutoMode) "Control Manual (Deshabilitado)" else "Control de Velocidad",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                if (isApplying && !isAutoMode) {
-                    Text("⏳", style = MaterialTheme.typography.titleMedium)
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(20.dp))
-            
-            // Display de velocidad
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "$fanSpeed%",
-                        style = MaterialTheme.typography.displayLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        text = "Velocidad",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (isAutoMode) {
+                            "Desactivado en modo automático"
+                        } else {
+                            "Desliza para ajustar"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+
+                if (isApplying && !isAutoMode) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(
+                            text = "$fanSpeed",
+                            style = MaterialTheme.typography.displaySmall,
+                            color = if (isAutoMode) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            }
+                        )
+                        Text(
+                            text = "%",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = if (isAutoMode) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    }
+                }
             }
-            
-            Spacer(modifier = Modifier.height(20.dp))
-            
+
             Slider(
                 value = fanSpeed.toFloat(),
                 onValueChange = { onSpeedChange(it.toInt()) },
                 valueRange = 0f..100f,
-                steps = 99,
                 enabled = !isAutoMode
             )
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            // Botones rápidos
-            Text(
-                text = "Velocidades Preestablecidas",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                OutlinedButton(
-                    onClick = { 
-                        onSpeedChange(0)
-                        onSetSpeed(0) 
-                    },
-                    modifier = Modifier.weight(1f),
-                    enabled = !isAutoMode
-                ) {
-                    Text("0%")
-                }
-                OutlinedButton(
-                    onClick = { 
-                        onSpeedChange(50)
-                        onSetSpeed(50) 
-                    },
-                    modifier = Modifier.weight(1f),
-                    enabled = !isAutoMode
-                ) {
-                    Text("50%")
-                }
-                OutlinedButton(
-                    onClick = { 
-                        onSpeedChange(100)
-                        onSetSpeed(100) 
-                    },
-                    modifier = Modifier.weight(1f),
-                    enabled = !isAutoMode
-                ) {
-                    Text("100%")
+                listOf(0, 50, 100).forEach { preset ->
+                    FilterChip(
+                        selected = fanSpeed == preset,
+                        onClick = {
+                            onSpeedChange(preset)
+                            onSetSpeed(preset)
+                        },
+                        label = { Text("$preset%") },
+                        enabled = !isAutoMode,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
         }
@@ -574,36 +685,45 @@ private fun SpeedControlCard(
 }
 
 /**
- * Tarjeta de información del perfil
+ * Información técnica del perfil.
  */
 @Composable
 private fun ProfileInfoCard(profile: CoolerProfile) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "ℹ️ Información del Perfil",
+                text = "Información",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.SemiBold
             )
-            
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
             InfoRow("Dispositivo", profile.deviceType.deviceName)
             InfoRow("Generación", "Gen ${profile.deviceType.generation}")
-            InfoRow("MAC", profile.macAddress)
+            InfoRow("Dirección MAC", profile.macAddress)
             InfoRow("Última conexión", profile.lastSeenFormatted)
-            
+
             profile.rgbConfig?.let { rgb ->
-                InfoRow("Efecto RGB", rgb.effect.name)
+                InfoRow("Efecto RGB", effectName(rgb.effect))
             }
         }
     }
+}
+
+private fun effectName(effect: LightEffect): String = when (effect) {
+    LightEffect.COLORFUL -> "Multicolor"
+    LightEffect.BREATH_FULLCOLOR -> "Respiración multicolor"
+    LightEffect.BREATH_SINGLE -> "Respiración de un color"
+    LightEffect.ALWAYS_BRIGHT -> "Color fijo"
 }
 
 @Composable
@@ -614,8 +734,9 @@ private fun InfoRow(label: String, value: String) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
         )
         Text(
             text = value,
@@ -637,7 +758,7 @@ private fun ConnectionErrorBanner(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer
         )

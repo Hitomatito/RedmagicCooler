@@ -1,11 +1,11 @@
 package com.hitomatito.redmagicooler.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,17 +21,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -40,21 +40,19 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.model.CoolerProfile
-import com.hitomatito.redmagicooler.model.ProfileStatus
 import kotlinx.coroutines.delay
 
 /**
- * Pantalla principal (Home) que muestra las tarjetas de los perfiles de coolers
- * UI limpia con solo los dispositivos agregados y botón para agregar más
+ * Pantalla principal: lista de coolers añadidos y acceso para añadir más.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,40 +71,51 @@ fun HomeScreen(
             onDismissError()
         }
     }
+
+    val connectedCount = profiles.count { it.isConnected }
+
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { 
-                    Column {
+                title = {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
                             text = "RedMagic Cooler",
-                            style = MaterialTheme.typography.titleLarge,
+                            style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "${profiles.size} dispositivo${if (profiles.size != 1) "s" else ""}",
+                            text = when {
+                                profiles.isEmpty() -> "Sin dispositivos"
+                                connectedCount > 0 -> "${profiles.size} dispositivo${if (profiles.size != 1) "s" else ""} · $connectedCount conectado${if (connectedCount != 1) "s" else ""}"
+                                else -> "${profiles.size} dispositivo${if (profiles.size != 1) "s" else ""}"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onAddDevice,
-                containerColor = MaterialTheme.colorScheme.primary
-            ) {
-                Icon(Icons.Filled.Add, "Agregar dispositivo")
+            if (profiles.isNotEmpty()) {
+                ExtendedFloatingActionButton(
+                    onClick = onAddDevice,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    text = { Text("Añadir") }
+                )
             }
         }
     ) { paddingValues ->
         Box(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
@@ -117,8 +126,8 @@ fun HomeScreen(
                 )
             } else {
                 LazyColumn(
-                    modifier = modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(
@@ -130,14 +139,14 @@ fun HomeScreen(
                             onClick = { onProfileClick(profile) }
                         )
                     }
-                    item {
-                        Spacer(modifier = Modifier.height(80.dp))
-                    }
                 }
             }
-            
+
             AnimatedVisibility(
                 visible = showError,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(16.dp),
                 enter = slideInVertically { -it } + fadeIn(),
                 exit = slideOutVertically { -it } + fadeOut()
             ) {
@@ -159,7 +168,7 @@ private fun ErrorBanner(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onDismiss),
-        shape = RoundedCornerShape(0.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer
         ),
@@ -189,7 +198,7 @@ private fun ErrorBanner(
 }
 
 /**
- * Tarjeta de perfil de cooler
+ * Tarjeta de un cooler: estado, velocidad y acceso al detalle.
  */
 @Composable
 private fun ProfileCard(
@@ -197,237 +206,197 @@ private fun ProfileCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val containerColor by animateColorAsState(
-        targetValue = when (profile.statusColor) {
-            ProfileStatus.CONNECTED -> MaterialTheme.colorScheme.primaryContainer
-            ProfileStatus.CONNECTING -> MaterialTheme.colorScheme.secondaryContainer
-            ProfileStatus.DISCONNECTED -> MaterialTheme.colorScheme.surfaceVariant
-        },
-        label = "containerColor"
-    )
+    val connected = profile.isConnected
 
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(MaterialTheme.shapes.large)
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-        elevation = CardDefaults.cardElevation(
-            defaultElevation = if (profile.isConnected) 4.dp else 1.dp
-        )
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Icono del dispositivo
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = profile.icon,
-                    style = MaterialTheme.typography.headlineLarge
-                )
-            }
-            
-            Spacer(modifier = Modifier.width(16.dp))
-            
-            // Información del perfil
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                // Nombre del perfil
-                Text(
-                    text = profile.displayName,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                
-                // Tipo de dispositivo
-                Text(
-                    text = profile.deviceType.deviceName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                
-                // Estado
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Indicador de conexión
                     Text(
-                        text = when (profile.statusColor) {
-                            ProfileStatus.CONNECTED -> "●"
-                            ProfileStatus.CONNECTING -> "●"
-                            ProfileStatus.DISCONNECTED -> "○"
-                        },
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    
-                    Text(
-                        text = profile.statusDescription,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = when (profile.statusColor) {
-                            ProfileStatus.CONNECTED -> MaterialTheme.colorScheme.primary
-                            ProfileStatus.CONNECTING -> MaterialTheme.colorScheme.secondary
-                            ProfileStatus.DISCONNECTED -> MaterialTheme.colorScheme.onSurfaceVariant
-                        }
+                        text = profile.icon,
+                        style = MaterialTheme.typography.titleLarge
                     )
                 }
-            }
-            
-            // Indicador RGB si está configurado
-            if (profile.rgbConfig != null && profile.isConnected) {
-                Text(
-                    text = "RGB",
-                    style = MaterialTheme.typography.titleLarge
+
+                Spacer(modifier = Modifier.width(14.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = profile.displayName,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = profile.deviceType.deviceName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        StatusDot(connected = connected)
+                        Text(
+                            text = when {
+                                connected && profile.isAutoMode -> "Conectado · Auto"
+                                connected -> "Conectado"
+                                profile.isAutoMode -> "Reconectando"
+                                else -> "Desconectado"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (connected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                }
+
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            
-            Spacer(modifier = Modifier.width(8.dp))
-            
-            // Icono de configuración
-            Icon(
-                imageVector = Icons.Filled.Settings,
-                contentDescription = "Configurar",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
-        }
-        
-        // Barra de información adicional si está conectado
-        if (profile.isConnected) {
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .padding(bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (profile.isAutoMode) {
+                if (connected) {
                     Text(
-                        text = "Modo Automatico",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
+                        text = if (profile.isAutoMode) "Modo automático" else "Velocidad ${profile.fanSpeed}%",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (profile.signalStrength != 0) {
+                        Text(
+                            text = when {
+                                profile.signalStrength >= -50 -> "Señal excelente"
+                                profile.signalStrength >= -70 -> "Señal buena"
+                                else -> "Señal regular"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     Text(
-                        text = "Velocidad: ${profile.fanSpeed}%",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = "Última conexión: ${profile.lastSeenFormatted}",
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                
-                if (profile.signalStrength != 0) {
-                    val signalText = when {
-                        profile.signalStrength >= -50 -> "📶 Excelente"
-                        profile.signalStrength >= -70 -> "📶 Buena"
-                        else -> "📡 Regular"
-                    }
-                    Text(
-                        text = signalText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        } else {
-            // Última conexión si está desconectado
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .padding(bottom = 12.dp)
-            ) {
-                Text(
-                    text = "Última conexión: ${profile.lastSeenFormatted}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
             }
         }
     }
 }
 
+@Composable
+private fun StatusDot(connected: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(
+                if (connected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outline
+                }
+            )
+    )
+}
+
 /**
- * Contenido cuando no hay perfiles
+ * Contenido cuando todavía no hay coolers añadidos.
  */
 @Composable
 private fun EmptyStateContent(
     onAddDevice: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
-        Card(
+        Box(
             modifier = Modifier
-                .padding(32.dp)
-                .fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
+                .size(96.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center
         ) {
-            Column(
-                modifier = Modifier
-                    .padding(32.dp)
-                    .fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                // Icono grande
-                Text(
-                    text = "❄️",
-                    style = MaterialTheme.typography.displayLarge
-                )
-                
-                // Título
-                Text(
-                    text = "Sin dispositivos",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                
-                // Descripción
-                Text(
-                    text = "Agrega tu primer cooler RedMagic para comenzar a controlar su velocidad y luces RGB.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                // Botón de agregar
-                Button(
-                    onClick = onAddDevice,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Agregar Dispositivo")
-                }
-                
-                // Texto de ayuda
-                Text(
-                    text = "Asegurate de que tu cooler este encendido y cerca del telefono",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
-            }
+            Text(text = "❄️", style = MaterialTheme.typography.headlineLarge)
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Aún no hay coolers",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Añade tu primer cooler RedMagic para controlar la velocidad y la iluminación RGB.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Button(
+            onClick = onAddDevice,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Añadir dispositivo")
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Text(
+            text = "Asegúrate de que el cooler esté encendido y cerca del teléfono.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
     }
 }
