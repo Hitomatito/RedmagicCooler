@@ -337,10 +337,12 @@ class MainActivity : ComponentActivity() {
                         arguments = listOf(navArgument("profileId") { type = NavType.StringType })
                     ) { backStackEntry ->
                         val profileId = backStackEntry.arguments?.getString("profileId") ?: return@composable
-                        
+                        val rgbProfile = profiles.find { it.id == profileId }
+
                         RGBControlScreen(
                             isConnected = isConnected && currentConnectedProfileId == profileId,
                             isAutoMode = isAutoMode,
+                            rgbConfig = rgbProfile?.rgbConfig,
                             onNavigateBack = { navController.popBackStack() },
                             onSetColorful = { 
                                 setColorful()
@@ -700,7 +702,7 @@ class MainActivity : ComponentActivity() {
         } else {
             statusMessage = "Error: tiempo de conexión agotado"
             connectionError = "El cooler no responde al conectar.\n" +
-                "Desactiva y activa el Bluetooth del teléfono y vuelve a pulsar Conectar."
+                "Desactiva y activa el Bluetooth del teléfono y vuelve a intentarlo."
             currentConnectedProfileId?.let { pid ->
                 profileRepository.updateConnectionState(pid, false)
             }
@@ -1018,7 +1020,7 @@ class MainActivity : ComponentActivity() {
                             // Fallo conocido del cooler: deja de responder al discovery hasta
                             // que se reinicia el Bluetooth del teléfono
                             connectionError = "El cooler no responde al conectar.\n" +
-                                "Desactiva y activa el Bluetooth del teléfono y vuelve a pulsar Conectar."
+                                "Desactiva y activa el Bluetooth del teléfono y vuelve a intentarlo."
                         }
                         
                         // Si estamos en medio de un reintento de discovery, no procesar desconexión
@@ -1365,7 +1367,6 @@ class MainActivity : ComponentActivity() {
             val service = CoolerService.getInstance()
             if (service != null) {
                 service.setRGBLight(effect, red, green, blue)
-                Toast.makeText(this, "Luz RGB establecida: ${effect.name}", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "Servicio no disponible", Toast.LENGTH_SHORT).show()
             }
@@ -1398,7 +1399,6 @@ class MainActivity : ComponentActivity() {
             
             if (result == true) {
                 Log.d(TAG, "Comando RGB enviado: ${effect.name}, R:$red G:$green B:$blue")
-                Toast.makeText(this, "Luz RGB establecida: ${effect.name}", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error en setRGBLight: ${e.message}")
