@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.CoolerDeviceType
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Pantalla para añadir un cooler: elegir modelo e iniciar la búsqueda.
@@ -73,7 +74,7 @@ fun AddDeviceScreen(
     // Detectar cuando se crea un perfil nuevo y navegar automáticamente
     LaunchedEffect(newlyCreatedProfileId) {
         newlyCreatedProfileId?.let { profileId ->
-            kotlinx.coroutines.delay(100)
+            kotlinx.coroutines.delay(100.milliseconds)
             onProfileCreated(profileId)
         }
     }

@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.CoolerDeviceType
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Pantalla principal: lista de coolers añadidos y acceso para añadir más.
@@ -74,7 +75,7 @@ fun HomeScreen(
     val showError = remember(connectionError) { connectionError != null }
     LaunchedEffect(connectionError) {
         if (connectionError != null) {
-            delay(8000L)
+            delay(8000L.milliseconds)
             onDismissError()
         }
     }
