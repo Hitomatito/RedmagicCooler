@@ -1,39 +1,116 @@
-# AGENTS.md
+# AGENTS.md — RedmagicCooler
 
-Unofficial Android app controlling RedMagic/Nubia magnetic coolers over BLE. Single Gradle module (`:app`), package `com.hitomatito.redmagicooler`.
+Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-module Android app
+(Kotlin + Jetpack Compose), no backend, no network permission.
+
+## Environment (read first)
+
+`java` is **not** on `PATH` on this machine — `./gradlew` fails with `JAVA_HOME is not set`.
+Export it before any Gradle command:
+
+```bash
+export JAVA_HOME="$HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2"   # Temurin 21.0.7
+```
+
+Android SDK is at `~/Android/Sdk` and already wired into `local.properties`
+(platform `android-36`, build-tools `36.0.0`).
+
+Android Studio is running in the background. When it syncs the project it can rewrite
+`gradle/libs.versions.toml` and `gradle/wrapper/gradle-wrapper.properties` on its own (version upgrades).
+If those files show up dirty in `git status` and you did not touch them, they are not yours — do not commit
+them blindly.
 
 ## Commands
 
-- Build debug APK: `./gradlew assembleDebug` (outputs to `app/build/outputs/apk/debug/`)
-- Unit tests: CI runs `./gradlew testDebugUnitTest --no-daemon --console=plain` (README says `./gradlew test`; both work)
-- Release APK: `./gradlew assembleRelease` (runs R8 + resource shrinking)
-- No lint, ktlint, detekt, or spotless configured — do not invent lint commands
-- CI (`.github/workflows/ci.yml`) = unit tests + assembleDebug + assembleRelease on push/PR to `main`; nothing else is enforced
+```bash
+./gradlew testDebugUnitTest   # unit tests (this is what CI runs)
+./gradlew assembleDebug       # -> app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease     # -> app/build/outputs/apk/release/
+```
 
-## Environment
+- CI (`.github/workflows/ci.yml`) runs exactly: `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21.
+  No lint, no detekt/ktlint, no spotless — **there is no formatter or linter configured**. IDE code style is `KOTLIN_OFFICIAL`.
+- `assembleRelease` enables **R8 minify + resource shrinking**. `app/proguard-rules.pro` keeps WorkManager
+  workers and line numbers; keep that rule if you add a worker.
+- Release signing is **conditional** on `keystore.properties` existing at the repo root (gitignored, never commit).
+  Without it the release variant builds unsigned.
+- `--offline` works for `testDebugUnitTest` / `assembleDebug` once artifacts are cached. `assembleRelease` and
+  `lintDebug` pull artifacts that are not in the local cache (`lint-gradle`, release-only Compose), so they
+  need network.
+- There is no `detekt`/`ktlint`/`spotless` task; do not invent one in commands.
 
-- Requires JDK 21, Android SDK Platform 36, Build-Tools 36.0.0, Gradle 9.4.1 (wrapper). `ANDROID_HOME` must point at an SDK with those packages installed.
-- `local.properties` is gitignored and absent by default; the SDK path comes from `ANDROID_HOME`/`sdk.dir`.
+## Architecture
 
-## Signing / secrets
+Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 
-- `keystore.properties` (repo root) holds the release keystore credentials. It is gitignored and **must never be committed**. A local one exists on the maintainer's machine; do not read, print, or modify it, and do not create one with real values.
-- Without `keystore.properties`, the release buildType has `signingConfig = null` and produces an unsigned APK; the build still succeeds.
+| Area | Files |
+| --- | --- |
+| Manual-mode BLE host + Compose nav | `MainActivity.kt` (1400+ lines) |
+| Auto-mode foreground service (BLE, thermal loop, notification, reconnect) | `CoolerService.kt` |
+| Thermal sensing + speed recommendation | `ThermalMonitor.kt` |
+| Profile persistence (SharedPreferences + JSON, `StateFlow`) | `data/ProfileRepository.kt` (singleton) |
+| Supported cooler models (advertising UUID + drawable) | `CoolerDeviceType.kt` (**package root, not `model/`**) |
+| BLE UUIDs, `RGBConfig`, `LightEffect` | `model/CoolerModels.kt` (`CoolerBleConstants` lives here) |
+| Profile model | `model/CoolerProfile.kt` |
+| Screens | `ui/` (Home, AddDevice, ProfileConfig, RGBControl, DeviceTypeSelector, BluetoothRequired) |
+| Theme / typography | `ui/theme/` |
 
-## Conventions & quirks
+**Two independent BLE GATT clients exist** and duplicate the scan/connect/discovery logic:
 
-- Kotlin 2.3.21, AGP 9.2.1, Compose (BOM 2026.05.00), single `:app` module. Plugins come from the version catalog (`gradle/libs.versions.toml`); the app module applies only `com.android.application` and `org.jetbrains.kotlin.plugin.compose` — do **not** add `org.jetbrains.kotlin.android` (AGP 9 built-in Kotlin).
-- In-app UI strings and code comments are Spanish; user-facing text should stay Spanish. README is English.
-- `MainActivity.kt` (~1400 lines) and `CoolerService.kt` (~1600 lines) are intentionally large — navigation + BLE orchestration live in `MainActivity`; the foreground service owns the GATT connection, auto thermal mode and reconnect backoff. Look there first, not in `ui/`.
-- `CoolerService.kt` contains `private const val DEBUG = true` with a note to set it false for production. Leave the toggle as-is unless the task is a release cut; don't "fix" it silently.
-- BLE protocol is reverse-engineered (no public spec). Constants live in `model/CoolerModels.kt` (`CoolerBleConstants`) and model UUIDs in `CoolerDeviceType.kt`. Fan speed is a raw byte 40–80 mapped from the UI 0–100%. Only the Heat Sink 5 Pro is hardware-tested; treat other models as unverified.
-- App declares no `INTERNET` permission and is local-first (profiles in SharedPreferences/JSON via `ProfileRepository`). Do not add network dependencies.
-- WorkManager (`FanAdjustmentWorker`) and scheduled automation are unfinished scaffolding, not wired-up features.
-- `proguard-rules.pro` keeps `androidx.work.ListenableWorker` subclasses and line numbers — keep those rules when editing release config.
-- `settings.gradle.kts` sets `rootProject.name = "RedmagiCooler"` (sic) — harmless, don't rename casually.
-- `android.nonTransitiveRClass=true`; reference module R classes explicitly, not transitively.
-- Tests: `app/src/test` holds only a placeholder `ExampleUnitTest`; `androidTest` has only the template `ExampleInstrumentedTest`. There is no real unit-test suite or fixtures — verify changes with `assembleDebug` and, for protocol logic, reasoning/manual review.
+- `MainActivity` owns the GATT client in **manual** mode.
+- `CoolerService` owns a second GATT client in **automatic** mode.
 
-## Commits
+Turning auto mode on **closes MainActivity's GATT** so the service takes over; turning it off sends
+`ACTION_SWITCH_TO_MANUAL`, waits ~3 s, then MainActivity reconnects. Any BLE change usually has to be made
+in **both** classes, or the two modes diverge.
 
-- Rough conventional-commit style with Spanish or English subjects is used (e.g. `feat(ui): ...`, `chore: subir versión a 1.3.0`). Version bumps mean editing `versionCode`/`versionName` in `app/build.gradle.kts`.
+## BLE protocol facts (reverse-engineered, no public spec)
+
+- Fan service `d52082ad-e805-9f97-9d4e-1c682d9c9ce6`; characteristics `0x1012` (fan speed), `0x1013` (RGB),
+  `0x1015` (temperature notify), `0x1018` (auto mode). Advertising service `00004a41-...`.
+- RGB command = 4 bytes: `[effectCode, r, g, b]`. Effect codes: `0x01` colorful, `0x02` full-color breath,
+  `0x03` single-color breath, `0x04` always bright.
+- Cooler detection: **advertising UUID first**, then strict BLE-name matching (`CoolerDeviceType.matchesBleName`).
+  Adding a model = new enum entry with its advertising UUID and a `drawable-nodpi` image.
+- `status == 22` (`GATT_CONN_TERMINATE_LOCAL_HOST`) is a **known cooler firmware limitation**, not an app bug:
+  the official Nubia app does the same. The app auto-reconnects with backoff (max 3 attempts) and shows a
+  "toggle Bluetooth" message. `discoverServices()` has a 10 s watchdog that forces a reconnect.
+- GATT lifecycle rules that matter: always `disconnect()` **then** `close()`; closing before the stack confirms
+  the disconnect breaks the next service discovery. Use `BleConnectionHelper.safeCloseGatt` / `safeStopScan`.
+
+### Fan-speed range trap
+
+The **live** mapping is `MainActivity.mapPercentToRaw` / `mapRawToPercent` → raw **40–80**.
+`CoolerBleConstants.percentageToRaw` / `rawToPercentage` (raw 40–200, the range stated in the README) are
+**dead code** — nothing calls them. `CoolerService` also calls `MainActivity.mapRawToPercent` when reading
+the fan characteristic. Use the `MainActivity` helpers; do not "fix" the range without hardware verification.
+
+## Conventions
+
+- **UI strings are hardcoded Spanish** — `res/values/strings.xml` contains only `app_name`, and there is zero
+  `stringResource` usage in the codebase. Inline Spanish literals are the existing convention; don't route new
+  strings through `strings.xml` unless asked to localize.
+- Code comments, KDoc and log messages are in **Spanish**; the README is in **English**. Match the file you edit.
+- Commit messages are Conventional Commits, usually **Spanish** subjects:
+  `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.3.0`, `docs: ...`. Recent commits mix in English.
+- Branches are `origin/<issue-number>-<spanish-description>`; PRs target `main`.
+- `settings.gradle.kts` has `rootProject.name = "RedmagiCooler"` (missing "c") while the application id, package
+  and app label are `RedmagicCooler` / `redmagicooler`. Don't rename casually — it changes the Gradle module name.
+- `CoolerService.DEBUG = true` gates verbose logging; the comment says flip it to `false` for production.
+
+## Testing reality
+
+- The only tests are the AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`). **There is no real test
+  coverage** and no mocking library is wired up (`testImplementation` is plain JUnit4 only — no MockK, no
+  Robolectric, no Turbine). Adding them means adding dependencies to `gradle/libs.versions.toml`.
+- Code that touches Android framework classes (`Context`, `BluetoothGatt`, `SensorManager`) is currently
+  untestable as written; extracting pure logic is usually the easiest path to coverage.
+
+## Do not
+
+- Add an `INTERNET` permission — the app is local-first by design and the README advertises it.
+- Add a `strings.xml` extraction or i18n layer without being asked.
+- Enable `SCHEDULE_EXACT_ALARM` requests at runtime: the permission is declared but intentionally filtered out of
+  the runtime prompt list; reconnect alarms fall back to inexact alarms when `canScheduleExactAlarms()` is false.
+- Assume `FanAdjustmentWorker` is wired up — it is scaffolding that only logs; scheduled automation is unfinished
+  by design.
