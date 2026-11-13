@@ -21,7 +21,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
 # Single test: ./gradlew :app:testDebugUnitTest --tests "com.hitomatito.redmagicooler.ExampleUnitTest"
 ```
 
-- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon`. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. IDE style: `KOTLIN_OFFICIAL`.
+- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon`. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
 - `assembleRelease` enables R8 minify + resource shrinking; keep `app/proguard-rules.pro` WorkManager/line-number rules when adding workers.
 - Release signing is conditional on root `keystore.properties` (gitignored, never commit); without it release builds unsigned.
 - `--offline` works for `testDebugUnitTest`/`assembleDebug` once cached; `assembleRelease` and `lintDebug` may need network for uncached artifacts.
@@ -36,7 +36,7 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 | Centralized runtime permissions | `BlePermissionManager.kt` |
 | Compose UI + navigation | `MainActivity.kt`, `ui/` |
 | Auto-mode foreground service (client of BLE engine) | `CoolerService.kt` |
-| Thermal sensing + speed recommendation | `ThermalMonitor.kt` |
+| Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt`, `ThermalMonitorManager.kt` (singleton; `initialize(context)` once, UI + service share it) |
 | Profile persistence (SharedPreferences + JSON, `StateFlow`) | `data/ProfileRepository.kt` (singleton) |
 | Scanner/connection helpers | `utils/BleConnectionHelper.kt` |
 | Supported cooler models (manufacturer subtype + drawable) | `CoolerDeviceType.kt` (**package root, not `model/`**) |
@@ -59,16 +59,15 @@ Automatic mode state is coordinated through `CoolerService` intents (`ACTION_STA
 
 ### Fan-speed range
 
-The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` → raw **40–80**. Do not “fix” it to 40–200 from the README; hardware verification says the cooler accepts 40–80.
+The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` → raw **40–80**. The README documents the same range; don't widen it to 40–200.
 
 ## Conventions
 
 - **UI strings are hardcoded Spanish** — `res/values/strings.xml` contains only `app_name`, and there is zero `stringResource` usage in the codebase. Inline Spanish literals are the existing convention; don’t route new strings through `strings.xml` unless asked to localize.
 - Code comments, KDoc and log messages are in **Spanish**; the README is in **English**. Match the file you edit.
-- Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.3.0`, `docs: ...`. Recent commits mix in English.
-- Branches are `origin/<issue-number>-<spanish-description>`; PRs target `main`.
+- Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.3.0`, `docs: ...`. Recent commits mix in English. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main` (one `feat/<english-slug>` branch exists).
 - `settings.gradle.kts` has `rootProject.name = "RedmagiCooler"` (missing "c") while the application id, package and app label are `RedmagicCooler` / `redmagicooler`. Don’t rename casually — it changes the Gradle module name.
-- `CoolerService.DEBUG = true` gates verbose logging; the comment says flip it to `false` for production.
+- `CoolerService.DEBUG = true` gates verbose logging; the comment says flip it to `false` for production. It's a `private const val`, so flip it by editing the file.
 - Compose lint rule: the first optional parameter on a `@Composable` should be `modifier: Modifier = Modifier`.
 
 ## Testing reality
