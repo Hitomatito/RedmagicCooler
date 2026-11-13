@@ -11,6 +11,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import com.hitomatito.redmagicooler.model.CoolerBleConstants
 import com.hitomatito.redmagicooler.model.CoolerProfile
@@ -37,6 +38,10 @@ class CoolerService : Service() {
         private const val TAG = "CoolerService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "cooler_service_channel"
+        // Azul de la paleta clara de respaldo (los dispositivos con Material You ignoran el tint).
+        private const val NOTIFICATION_COLOR = 0xFF415F91.toInt()
+        // Niveles térmicos que se pasan a la notificación; cualquier otro texto es estado transitorio.
+        private val THERMAL_STATUSES = setOf("Normal", "Tibio", "Caliente", "Critico")
 
         const val ACTION_START_AUTO = "com.hitomatito.redmagicooler.START_AUTO"
         const val ACTION_STOP_AUTO = "com.hitomatito.redmagicooler.STOP_AUTO"
@@ -445,58 +450,74 @@ class CoolerService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         
-        // Determinar emoji y mensaje según el contexto
+        // Estado térmico con lectura válida: la notificación muestra temperatura y ventilador.
+        val isThermal = status in THERMAL_STATUSES
+
         val title: String
         val contentText: String
-        
-        // Si no está conectado o hay un error
-        if (status.contains("Error") || status.contains("Esperando") || 
-            status.contains("Buscando") || status.contains("Conectando") || 
-            status.contains("Desconectado")) {
-            title = "Modo Automático"
-            contentText = status
-        } else {
-            // Conectado y funcionando
-            val statusEmoji = when (status) {
-                "Critico" -> "🔴"
-                "Caliente" -> "🟠"
-                "Tibio" -> "🟡"
-                "Normal" -> "🟢"
-                else -> "🟢"
-            }
-            
-            title = "$statusEmoji ${"%.1f".format(temp)}°C • Modo Auto"
-            
-            contentText = if (speed > 0) {
-                "Enfriando $speed% • $status"
+        if (isThermal) {
+            title = if (speed > 0) {
+                "${"%.1f".format(temp)} °C · Ventilador $speed%"
             } else {
-                "En reposo • Temp. $status"
+                "${"%.1f".format(temp)} °C · En reposo"
+            }
+            contentText = "Modo automático · $status"
+        } else {
+            title = "Modo automático"
+            contentText = status
+        }
+
+        // Vista personalizada compacta; al expandir se reutiliza (sin panel grande).
+        val collapsed = RemoteViews(packageName, R.layout.notification_cooler_collapsed)
+        if (isThermal) {
+            val tempText = "%.1f".format(temp)
+            collapsed.setTextViewText(R.id.notif_main, "$tempText °C · Ventilador $speed% · $status")
+            collapsed.setProgressBar(R.id.notif_progress, 100, speed, false)
+            val (avatar, fan) = when (status) {
+                "Normal" -> R.drawable.notif_avatar_ok to R.drawable.notif_fan_ok
+                "Tibio" -> R.drawable.notif_avatar_warm to R.drawable.notif_fan_warm
+                "Caliente" -> R.drawable.notif_avatar_hot to R.drawable.notif_fan_hot
+                "Critico" -> R.drawable.notif_avatar_critical to R.drawable.notif_fan_critical
+                else -> R.drawable.notif_avatar_idle to R.drawable.notif_fan_idle
+            }
+            collapsed.setImageViewResource(R.id.notif_avatar, fan)
+            try {
+                collapsed.setInt(R.id.notif_avatar, "setBackgroundResource", avatar)
+            } catch (e: Exception) {
+                logDebug("No se pudo cambiar el avatar de la notificación: ${e.message}")
+            }
+        } else {
+            collapsed.setTextViewText(R.id.notif_main, "RedMagic Cooler · $status")
+            collapsed.setProgressBar(R.id.notif_progress, 0, 0, true)
+            collapsed.setImageViewResource(R.id.notif_avatar, R.drawable.notif_fan_idle)
+            try {
+                collapsed.setInt(R.id.notif_avatar, "setBackgroundResource", R.drawable.notif_avatar_idle)
+            } catch (e: Exception) {
+                logDebug("No se pudo cambiar el avatar de la notificación: ${e.message}")
             }
         }
-        
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(contentText)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSubText("RedMagic Cooler")
+            .setSmallIcon(R.drawable.ic_notification_fan)
+            .setColor(NOTIFICATION_COLOR)
             .setOngoing(true)
             .setShowWhen(false)
             .setOnlyAlertOnce(true) // Solo alertar una vez, updates silenciosos
             .setSilent(true) // Silenciosa para ahorrar recursos
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(openPendingIntent)
-            .addAction(
-                android.R.drawable.ic_input_get,
-                "Manual",
-                manualPendingIntent
-            )
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "Detener",
-                stopPendingIntent
-            )
+            .addAction(0, "Manual", manualPendingIntent)
+            .addAction(0, "Detener", stopPendingIntent)
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+            .setCustomContentView(collapsed)
             .setPriority(NotificationCompat.PRIORITY_MIN)  // MIN para no mostrar en status bar
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)  // Diferir mostrar en status bar
-            .build()
+
+        return builder.build()
     }
     
     private fun updateNotification(status: String, speed: Int, temp: Float) {

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingVertical="4dp"
+    android:paddingHorizontal="12dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <!-- Avatar que cambia al color del estado térmico (icono + fondo) -->
+        <ImageView
+            android:id="@+id/notif_avatar"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:padding="5dp"
+            android:background="@drawable/notif_avatar_idle"
+            android:src="@drawable/notif_fan_idle"
+            android:contentDescription="Ventilador" />
+
+        <TextView
+            android:id="@+id/notif_main"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:includeFontPadding="false"
+            android:text="Modo automático"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
+    </LinearLayout>
+
+    <!-- Línea de progreso del fan (2dp) al pie de la notificación -->
+    <ProgressBar
+        android:id="@+id/notif_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:layout_marginTop="3dp"
+        android:max="100"
+        android:progress="0"
+        android:minHeight="2dp"
+        android:maxHeight="2dp"
+        android:progressDrawable="@drawable/notif_progress"
+        android:indeterminateDrawable="@drawable/notif_progress" />
+</LinearLayout>

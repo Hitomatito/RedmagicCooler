@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Pista: línea tenue que ocupa todo el ancho -->
+    <item android:id="@android:id/background">
+        <shape android:shape="rectangle">
+            <solid android:color="#14FFFFFF" />
+            <corners android:radius="1.5dp" />
+        </shape>
+    </item>
+    <!-- Progreso: degradado violeta → cian -->
+    <item android:id="@android:id/progress">
+        <clip>
+            <shape android:shape="rectangle">
+                <gradient
+                    android:type="linear"
+                    android:startColor="#7C5CFF"
+                    android:endColor="#49E0FF"
+                    android:angle="0" />
+                <corners android:radius="1.5dp" />
+            </shape>
+        </clip>
+    </item>
+</layer-list>
