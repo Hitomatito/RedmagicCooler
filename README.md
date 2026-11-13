@@ -41,7 +41,7 @@ RedmagicCooler is a community-built Android client for RedMagic / Nubia magnetic
 
 ## Supported devices
 
-The app matches each cooler by its BLE advertising UUID. Choose your model in the app, then scan.
+The app matches each cooler by its manufacturer data in the BLE scan record, with BLE-name matching used to disambiguate models. Choose your model in the app, then scan.
 
 | Generation | Model | Compatibility |
 | :---: | --- | --- |
@@ -72,9 +72,9 @@ Requirements:
 | Tool | Version |
 | --- | --- |
 | JDK | 21 |
-| Android SDK Platform | 36 |
+| Android SDK Platform | 37 |
 | Android Build Tools | 36.0.0 |
-| Gradle | 9.4.1 (wrapper) |
+| Gradle | 9.9.1 (wrapper) |
 
 ```bash
 git clone https://github.com/Hitomatito/RedmagicCooler.git
@@ -146,7 +146,7 @@ The app uses the RedMagic advertising service and the cooler's fan service:
 | RGB control | `00001013-0000-1000-8000-00805f9b34fb` |
 | Automatic mode control | `00001018-0000-1000-8000-00805f9b34fb` |
 
-Fan speed is sent as a raw value between `40` and `200`, mapped from the UI's `0–100%` range. The full list of model-specific advertising UUIDs lives in [`CoolerDeviceType.kt`](app/src/main/java/com/hitomatito/redmagicooler/CoolerDeviceType.kt).
+Fan speed is sent as a raw value between `40` and `80`, mapped from the UI's `0–100%` range. The full list of model-specific manufacturer subtypes lives in [`CoolerDeviceType.kt`](app/src/main/java/com/hitomatito/redmagicooler/CoolerDeviceType.kt).
 
 </details>
 
@@ -157,14 +157,15 @@ Fan speed is sent as a raw value between `40` and `200`, mapped from the UI's `0
 
 | Component | Responsibility |
 | --- | --- |
-| `MainActivity` | Compose host, navigation, and BLE orchestration. |
-| `CoolerService` | Foreground service: GATT connection, automatic mode, notifications, and reconnect backoff. |
+| `MainActivity` | Compose host and navigation; observes the BLE engine and issues commands. |
+| `CoolerService` | Foreground service for automatic mode: notifications, thermal loop, and BLE commands via the shared engine. |
 | `ThermalMonitor` | Battery and system thermal sensors, temperature levels, and recommended fan speed. |
-| `ProfileRepository` | Local profile storage using SharedPreferences and JSON. |
+| `ProfileRepository` | Local profile storage using SharedPreferences and JSON. Profiles are managed independently; no separate active-profile id is persisted. |
 | `ui/` | Home, Add device, Profile, and RGB screens with a Material 3 theme. |
-| `model/` | BLE constants, supported cooler types, profiles, and RGB configuration. |
+| `model/` | BLE constants, profiles, and RGB configuration. |
+| `ble/` | Single GATT owner and op queue. |
 
-**Stack:** Kotlin 2.3, Jetpack Compose, Material 3, Coroutines/Flow, Navigation Compose, WorkManager, and Android BLE GATT. The app targets Android 16 (API 36) and supports Android 7.0 (API 24) and newer.
+**Stack:** Kotlin 2.4, Jetpack Compose, Material 3, Coroutines/Flow, Navigation Compose, WorkManager, and Android BLE GATT. The app targets Android 17 (API 37) and supports Android 7.0 (API 24) and newer.
 
 ## Development
 
