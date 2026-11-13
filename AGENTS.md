@@ -9,6 +9,8 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
   export JAVA_HOME="$HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2"   # Temurin 21.0.7
   ```
 - Android SDK: `~/Android/Sdk` (wired in `local.properties`, platform `android-37.0`, build-tools `36.0.0`).
+- Toolchain: Gradle 9.9.1 (wrapper), AGP 9.5.1, Kotlin 2.4.21 (`gradle/libs.versions.toml`). The tracked `gradle/gradle-daemon-jvm.properties` pins the daemon JVM via the foojay resolver plugin in `settings.gradle.kts`; the exported `JAVA_HOME` above is still needed for direct `./gradlew` launches.
+- `.idea/` is partially tracked (code styles, run configurations, inspection profiles are committed; `caches/`, `workspace.xml` etc. are gitignored). Don't commit IDE noise blindly.
 - Android Studio may rewrite `gradle/libs.versions.toml` and `gradle/wrapper/gradle-wrapper.properties` on sync (version upgrades). If those are dirty and you didn’t touch them, don’t commit them blindly. The current wrapper bump keeps `retries=0` and `retryBackOffMs=500`; change those only when intentionally updating Gradle.
 
 ## Commands
@@ -24,7 +26,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
 - CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon`. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
 - `assembleRelease` enables R8 minify + resource shrinking; keep `app/proguard-rules.pro` WorkManager/line-number rules when adding workers.
 - Release signing is conditional on root `keystore.properties` (gitignored, never commit); without it release builds unsigned.
-- `--offline` works for `testDebugUnitTest`/`assembleDebug` once cached; `assembleRelease` and `lintDebug` may need network for uncached artifacts.
+- `--offline` works for `testDebugUnitTest`, `assembleDebug`, `lintDebug` and `assembleRelease` once cached; `assembleRelease` may need network for uncached artifacts.
 
 ## Architecture
 
