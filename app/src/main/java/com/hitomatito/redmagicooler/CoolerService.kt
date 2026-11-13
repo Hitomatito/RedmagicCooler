@@ -20,6 +20,7 @@ import com.hitomatito.redmagicooler.data.ProfileRepository
 import com.hitomatito.redmagicooler.ble.CoolerBleManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -64,7 +65,7 @@ class CoolerService : Service() {
         fun getInstance(): CoolerService? = instance
     }
     
-    private lateinit var thermalMonitor: ThermalMonitor
+    private var thermalDataCollectionJob: Job? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     // La conexión GATT y la detección viven en CoolerBleManager (propietario único).
     // El servicio actúa como cliente: observa eventos y emite comandos.
@@ -77,6 +78,7 @@ class CoolerService : Service() {
     private var lastNotifiedSpeed = -1
     private var lastNotifiedTemp = -1f
     private var currentSpeedFromRead = -1 // Para almacenar resultado de lecturas BLE
+    private var lastLoggedRecommendedSpeed = -1
     
     // Perfil específico para el modo automático
     private var activeProfile: CoolerProfile? = null
@@ -99,9 +101,8 @@ class CoolerService : Service() {
         
         startForeground(NOTIFICATION_ID, createNotification("Iniciando...", currentSpeed, currentTemp))
         
-        thermalMonitor = ThermalMonitor(this)
-        // No iniciar sensor ambiental en background para ahorrar batería
-        // thermalMonitor.startAmbientSensor()
+        // Monitor térmico único compartido con la actividad
+        ThermalMonitorManager.initialize(this)
         CoolerBleManager.init(this)
         observeBleEvents()
         
@@ -247,8 +248,9 @@ class CoolerService : Service() {
             ACTION_STOP_AUTO -> {
                 Log.d(TAG, "ACTION_STOP_AUTO: Deteniendo servicio y liberando recursos")
                 
-                // Detener monitoreo térmico primero
-                thermalMonitor.stopMonitoring()
+                 // Detener monitoreo térmico automático; el monitor compartido sigue alimentando la UI
+                thermalDataCollectionJob?.cancel()
+                thermalDataCollectionJob = null
                 
                 // Desconectar el motor BLE de forma intencional (cancela reintentos)
                 CoolerBleManager.disconnect()
@@ -356,7 +358,8 @@ class CoolerService : Service() {
         // Detener monitoreo y cancelar coroutines.
         // La conexión GATT la mantiene CoolerBleManager (compartida con MainActivity):
         // no la cerramos aquí para que la app pueda seguir usándola tras salir del servicio.
-        thermalMonitor.stopMonitoring()
+        thermalDataCollectionJob?.cancel()
+        thermalDataCollectionJob = null
         serviceScope.cancel()
     }
     
@@ -383,8 +386,9 @@ class CoolerService : Service() {
                 // Actualizar notificación
                 updateNotification("Modo Manual", currentSpeed, currentTemp)
                 
-                // Detener monitoreo térmico automático
-                thermalMonitor.stopMonitoring()
+                // Detener monitoreo térmico automático; el monitor compartido sigue alimentando la UI
+                thermalDataCollectionJob?.cancel()
+                thermalDataCollectionJob = null
                 
                 // Opcional: detener el servicio después de cambiar a manual
                 // El servicio puede seguir activo para mantener la conexión
@@ -547,8 +551,8 @@ class CoolerService : Service() {
                 // Esperar 2 segundos para que la conexión BLE se estabilice
                 delay(2000L)
                 
-                // Obtener datos térmicos actuales inmediatamente
-                val thermalData = thermalMonitor.getCurrentThermalData(0)
+                // Obtener la instantánea térmica más reciente del monitor compartido
+                val thermalData = ThermalMonitorManager.currentFreshData()
                 currentTemp = thermalData.maxTemp
                 
                 logDebug("Calibración inicial - Temperatura: ${thermalData.maxTemp}°C, Nivel: ${thermalData.tempLevel}")
@@ -605,7 +609,14 @@ class CoolerService : Service() {
     }
 
     private fun startThermalMonitoring() {
-        thermalMonitor.startMonitoring(serviceScope) { data ->
+        // Solo la controladora automática consume el estado compartido; la UI tiene su propio colector.
+        thermalDataCollectionJob?.cancel()
+        thermalDataCollectionJob = serviceScope.launch {
+            ThermalMonitorManager.thermalData.collect { data ->
+            if (data.recommendedSpeed != lastLoggedRecommendedSpeed) {
+                logDebug("Monitor térmico: ${data.tempSources}")
+                lastLoggedRecommendedSpeed = data.recommendedSpeed
+            }
             currentTemp = data.maxTemp
             
             if (CoolerBleManager.isHealthy()) {
@@ -641,6 +652,7 @@ class CoolerService : Service() {
                 updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
             } else {
                 updateNotificationIfNeeded("Esperando conexión", 0, currentTemp)
+            }
             }
         }
     }
@@ -735,8 +747,6 @@ class CoolerService : Service() {
             Log.e(TAG, "Error cargando estado: ${e.message}")
         }
     }
-    
-
     
     // Funciones de logging condicional
     private fun logDebug(message: String) {

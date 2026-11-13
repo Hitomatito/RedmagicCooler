@@ -136,22 +136,6 @@ enum class CoolerDeviceType(
                 else -> null
             }
         }
-
-        /**
-         * Encuentra el tipo de dispositivo por nombre
-         */
-        fun fromDeviceName(name: String): CoolerDeviceType? {
-            return CoolerDeviceType.entries.find {
-                it.deviceName.equals(name, ignoreCase = true)
-            }
-        }
-
-        /**
-         * Obtiene todos los nombres de dispositivos para mostrar en UI
-         */
-        fun getAllDeviceNames(): List<String> {
-            return CoolerDeviceType.entries.map { it.deviceName }
-        }
     }
 
     /**
@@ -188,15 +172,4 @@ enum class CoolerDeviceType(
         }
     }
 
-    /**
-     * Icono sugerido para este tipo de dispositivo (para UI futura)
-     */
-    fun getSuggestedIcon(): String {
-        return when (generation) {
-            1, 2 -> "🌀"
-            3, 4 -> "❄️"
-            5, 6 -> "🔷"
-            else -> "Dispositivo"
-        }
-    }
 }

@@ -36,6 +36,7 @@ import com.hitomatito.redmagicooler.ui.RGBControlScreen
 import com.hitomatito.redmagicooler.ui.theme.RedmagiCoolerTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -69,12 +70,11 @@ class MainActivity : ComponentActivity() {
     // Perfil recién creado (para navegación automática)
     private var newlyCreatedProfileId by mutableStateOf<String?>(null)
     
-    // Monitor térmico y modo automático
-    private lateinit var thermalMonitor: ThermalMonitor
+    // Estado térmico compartido por esta UI y CoolerService
     private val monitoringScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var thermalDataCollectionJob: Job? = null
     private var isAutoMode by mutableStateOf(false)
     private var thermalData by mutableStateOf(ThermalMonitor.ThermalData())
-    private var lastAutoAdjustTime = 0L
     
     // Control de Bluetooth
     private var showBluetoothRequired by mutableStateOf(false)
@@ -217,8 +217,12 @@ class MainActivity : ComponentActivity() {
             }
         }
         
-        // Inicializar monitor térmico
-        thermalMonitor = ThermalMonitor(this)
+        // Inicializar monitor térmico único y alimentar la UI desde él
+        ThermalMonitorManager.initialize(this)
+        thermalDataCollectionJob?.cancel()
+        thermalDataCollectionJob = monitoringScope.launch {
+            ThermalMonitorManager.thermalData.collect { data -> thermalData = data }
+        }
 
         // Motor BLE: propietario único de la conexión (compartido con CoolerService)
         CoolerBleManager.init(this)
@@ -574,9 +578,7 @@ class MainActivity : ComponentActivity() {
             currentConnectedProfileId = null
             statusMessage = "Desconectado"
             
-            if (!isServiceRunning(CoolerService::class.java)) {
-                thermalMonitor.stopMonitoring()
-            }
+            // El monitor compartido sigue mostrando temperatura; solo el servicio controla el cooler.
             
             Log.d(TAG, "Desconectado del cooler")
         } catch (e: SecurityException) {
@@ -647,7 +649,6 @@ class MainActivity : ComponentActivity() {
             monitoringScope.cancel()
             
             CoolerBleManager.stopScan()
-            thermalMonitor.stopMonitoring()
             
             // Si el servicio no está activo, liberar la conexión para ahorrar batería.
             // Si está activo (modo automático), el GATT compartido se mantiene.
@@ -659,20 +660,8 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Error liberando recursos: ${e.message}", e)
         }
-    }private fun startThermalMonitoring() {
-        thermalMonitor.startMonitoring(monitoringScope) { data ->
-            thermalData = data
-            
-            if (isAutoMode && isConnected && !isServiceRunning(CoolerService::class.java)) {
-                val currentTime = System.currentTimeMillis()
-                if (currentTime - lastAutoAdjustTime > 5000) {
-                    setFanSpeed(data.recommendedSpeed)
-                    lastAutoAdjustTime = currentTime
-                }
-            }
-        }
     }
-    
+
     private fun toggleAutoMode(profileId: String) {
         isAutoMode = !isAutoMode
         profileRepository.updateAutoMode(profileId, isAutoMode)

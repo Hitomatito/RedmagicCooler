@@ -4,10 +4,6 @@ package com.hitomatito.redmagicooler
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
@@ -20,7 +16,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -36,19 +31,17 @@ class ThermalMonitor(private val context: Context) {
         const val TEMP_HOT = 55         // 50-55°C: Caliente
         const val TEMP_CRITICAL = 60    // > 60°C: Crítico
         
-        // Umbral de estabilidad para evitar cambios frecuentes
-        private const val MIN_SPEED_CHANGE = 10  // Cambio mínimo de velocidad: 10%
-        
         // Sistema de rampa progresiva
-        private const val SPEED_INCREMENT = 15   // Incremento de velocidad por paso: 15%
+        private const val SPEED_INCREMENT = 10   // Incremento normal por paso: 10%
+        private const val EMERGENCY_INCREMENT = 20 // Incremento con riesgo sostenido: 20%
         private const val MIN_TIME_AT_SPEED = 30000L  // Tiempo mínimo en cada velocidad: 30 segundos
-        private const val PROGRESSIVE_INCREASE_DELAY = 20000L // Espera entre incrementos: 20 segundos
+        private const val PROGRESSIVE_INCREASE_DELAY = 20000L // Espera entre subidas normales: 20 segundos
+        private const val EMERGENCY_INCREASE_DELAY = 10000L // Espera entre subidas con riesgo sostenido
+        private const val CRITICAL_SUSTAINED_MS = 45000L     // Tiempo mínimo de riesgo alto sostenido
     }
 
     private var monitoringJob: Job? = null
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-    private var ambientTemp: Float = 0f
     
     // Variables para estabilidad
     private var lastRecommendedSpeed: Int = 0
@@ -62,6 +55,9 @@ class ThermalMonitor(private val context: Context) {
     // Contador de intervalos de actualización
     private var intervalCounter: Int = 0
     
+    // Inicio de un episodio de riesgo hardware sostenido
+    private var hardwareRiskSinceMs: Long = 0L
+
     // Caché de rutas térmicas para optimización
     private val thermalZoneCache = mutableMapOf<Int, Pair<File, File>>()
     private var thermalCacheInitialized = false
@@ -76,14 +72,30 @@ class ThermalMonitor(private val context: Context) {
         val recommendedSpeed: Int = 0,        // Velocidad recomendada del cooler (0-100%)
         val tempLevel: TempLevel = TempLevel.SAFE,
         val tempSources: String = "",         // Fuentes de temperatura detectadas (para debug)
+        val hardwarePeakTemp: Float = 0f,     // Máximo detectado en sensores hardware
         val intervalCount: Int = 0            // Contador de intervalos de actualización
     )
+
+    private enum class ControlSource(val label: String) {
+        NONE("none"),
+        SKIN("skin"),
+        BATTERY("battery"),
+        HARDWARE("hardware")
+    }
     
     enum class TempLevel {
         SAFE,       // Verde: < 40°C
-        WARM,       // Amarillo: 40-48°C
-        HOT,        // Naranja: 48-50°C
-        CRITICAL    // Rojo: > 50°C
+        WARM,       // Amarillo: 40-50°C
+        HOT,        // Naranja: 50-55°C
+        CRITICAL    // Rojo: >= 55°C
+    }
+
+    // Evita duplicar la escala en control y sondeo.
+    private fun tempLevelForSignal(value: Float): TempLevel = when {
+        value < TEMP_SAFE -> TempLevel.SAFE
+        value < TEMP_WARM -> TempLevel.WARM
+        value < TEMP_HOT -> TempLevel.HOT
+        else -> TempLevel.CRITICAL
     }
     
     /**
@@ -109,11 +121,9 @@ class ThermalMonitor(private val context: Context) {
                     }
                     
                     intervalCounter++
-                    val thermalData = getCurrentThermalData(intervalCounter)
-                    withContext(Dispatchers.Main) {
-                        onUpdate(thermalData)
-                    }
-                    val adaptiveInterval = getAdaptiveInterval(thermalData.tempLevel)
+                    val thermalData = readCurrentThermalData(intervalCounter, advanceCriticalState = true)
+                    onUpdate(thermalData)
+                    val adaptiveInterval = getAdaptiveInterval(thermalData.tempLevel, thermalData.hardwarePeakTemp)
                     delay(adaptiveInterval)
                 } catch (e: CancellationException) {
                     Log.d(TAG, "Monitoreo cancelado: ${e.message}")
@@ -135,12 +145,18 @@ class ThermalMonitor(private val context: Context) {
     }
     
     /**
-     * Obtiene datos térmicos actuales del dispositivo
+     * Obtiene datos térmicos actuales sin avanzar el estado de riesgo.
+     * El bucle de monitoreo usa [readCurrentThermalData] para actualizar la histéresis.
      */
-    fun getCurrentThermalData(intervalCount: Int = 0): ThermalData {
+    fun getCurrentThermalData(intervalCount: Int = 0): ThermalData =
+        readCurrentThermalData(intervalCount, advanceCriticalState = false)
+
+    /**
+     * Lee sensores y opcionalmente avanza la histéresis de riesgo.
+     */
+    private fun readCurrentThermalData(intervalCount: Int, advanceCriticalState: Boolean): ThermalData {
         val batteryTemp = getBatteryTemperature()
         val thermalZoneTemps = readThermalZones()
-        val sensorTemp = ambientTemp
         
         // Extraer temperaturas específicas
         val cpuTemp = thermalZoneTemps["cpu"] ?: thermalZoneTemps.entries
@@ -155,13 +171,41 @@ class ThermalMonitor(private val context: Context) {
             thermalZoneTemps.entries.filter { it.key.contains("skin") || it.key.contains("case") }
             .maxByOrNull { it.value }?.value ?: 0f
         
-        // Determinar temperatura máxima: priorizar GPU > CPU > otros > batería
-        val maxTemp = when {
-            gpuTemp > 0 -> gpuTemp
-            cpuTemp > 0 -> cpuTemp
-            thermalZoneTemps.isNotEmpty() -> thermalZoneTemps.values.maxOrNull() ?: batteryTemp
-            else -> batteryTemp
+        val hardwareZoneTemps = thermalZoneTemps.filter { (key, _) ->
+            val normalizedKey = key.lowercase()
+            !normalizedKey.contains("skin") && !normalizedKey.contains("case")
         }
+        val hardwarePeakTemp = hardwareZoneTemps.values.maxOrNull() ?: 0f
+
+        // Temperatura principal: superficie; si no está disponible, batería.
+        // Los picos hardware solo se usan tras riesgo sostenido.
+        val controlBase = when {
+            skinTemp > 0f -> skinTemp
+            batteryTemp > 0f -> batteryTemp
+            else -> 0f
+        }
+        val controlSource = when {
+            skinTemp > 0f -> ControlSource.SKIN
+            batteryTemp > 0f -> ControlSource.BATTERY
+            else -> ControlSource.NONE
+        }
+
+        // Riesgo hardware: solo una señal alta y sostenida durante 45 s
+        // justifica elevar la estrategia de emergencia.
+        if (advanceCriticalState) {
+            val currentTime = System.currentTimeMillis()
+            if (hardwarePeakTemp >= TEMP_HOT) {
+                if (hardwareRiskSinceMs == 0L) {
+                    hardwareRiskSinceMs = currentTime
+                }
+            } else {
+                hardwareRiskSinceMs = 0L
+            }
+        }
+        val isRiskConfirmed = hardwareRiskSinceMs != 0L &&
+            System.currentTimeMillis() - hardwareRiskSinceMs >= CRITICAL_SUSTAINED_MS
+        val maxTemp = if (isRiskConfirmed) hardwarePeakTemp else controlBase
+        val displayedSource = if (isRiskConfirmed) ControlSource.HARDWARE else controlSource
         
         val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             getThermalStatus()
@@ -169,14 +213,9 @@ class ThermalMonitor(private val context: Context) {
             0 // THERMAL_STATUS_NONE para versiones anteriores
         }
         
-        val tempLevel = when {
-            maxTemp < TEMP_SAFE -> TempLevel.SAFE
-            maxTemp < TEMP_WARM -> TempLevel.WARM
-            maxTemp < TEMP_HOT -> TempLevel.HOT
-            else -> TempLevel.CRITICAL
-        }
+        val tempLevel = tempLevelForSignal(maxTemp)
         
-        val recommendedSpeed = calculateRecommendedSpeed(maxTemp)
+        val recommendedSpeed = calculateRecommendedSpeed(maxTemp, isRiskConfirmed)
         
         // Debug info de fuentes
         val sources = buildString {
@@ -184,7 +223,8 @@ class ThermalMonitor(private val context: Context) {
             if (cpuTemp > 0) append(", CPU: ${"%.1f".format(cpuTemp)}°C")
             if (gpuTemp > 0) append(", GPU: ${"%.1f".format(gpuTemp)}°C")
             if (skinTemp > 0) append(", Skin: ${"%.1f".format(skinTemp)}°C")
-            if (sensorTemp > 0) append(", Sensor: ${"%.1f".format(sensorTemp)}°C")
+            val riskLabel = if (isRiskConfirmed) ", risk" else ""
+            append(", Control: ${"%.1f".format(maxTemp)}°C (${displayedSource.label}$riskLabel)")
             if (thermalZoneTemps.isNotEmpty()) {
                 val otherTemps = thermalZoneTemps.filter { it.key !in listOf("cpu", "gpu", "skin", "case") && !it.key.contains("cpu") && !it.key.contains("gpu") && !it.key.contains("skin") && !it.key.contains("case") }
                 if (otherTemps.isNotEmpty()) {
@@ -203,6 +243,7 @@ class ThermalMonitor(private val context: Context) {
             recommendedSpeed = recommendedSpeed,
             tempLevel = tempLevel,
             tempSources = sources,
+            hardwarePeakTemp = hardwarePeakTemp,
             intervalCount = intervalCount
         )
     }
@@ -287,30 +328,6 @@ class ThermalMonitor(private val context: Context) {
     }
     
     /**
-     * Inicia el listener de sensor de temperatura ambiente (si disponible)
-     */
-    fun startAmbientSensor() {
-        try {
-            val tempSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_AMBIENT_TEMPERATURE)
-            if (tempSensor != null) {
-                sensorManager.registerListener(object : SensorEventListener {
-                    override fun onSensorChanged(event: SensorEvent?) {
-                        event?.let {
-                            ambientTemp = it.values[0]
-                        }
-                    }
-                    
-                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-                }, tempSensor, SensorManager.SENSOR_DELAY_NORMAL)
-                
-                Log.d(TAG, "Sensor de temperatura ambiente registrado")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "No se pudo registrar sensor de temperatura: ${e.message}")
-        }
-    }
-    
-    /**
      * Obtiene el estado térmico del sistema
      */
     @RequiresApi(Build.VERSION_CODES.Q)
@@ -328,18 +345,19 @@ class ThermalMonitor(private val context: Context) {
      * Con sistema de rampa progresiva y estabilización
      * 
      * Lógica de calibración:
-     * - < 40 °C: 0% (apagado, no necesario)
-     * - 40-48 °C: 25-50% (enfriamiento suave)
-     * - 48-50 °C: 50-75% (enfriamiento activo)
-     * - 50-55 °C: 75-100% (enfriamiento máximo)
-     * - > 55 °C: 100% (emergencia)
+ * - < 40 °C: 0% (apagado, no necesario)
+ * - 40-50 °C: 25-50% (enfriamiento suave)
+ * - 50-55 °C: 50-75% (enfriamiento activo)
+ * - 55-60 °C: 75-100% (enfriamiento máximo)
+ * - >= 60 °C: 100% (emergencia)
      * 
      * Sistema progresivo:
-     * - La velocidad aumenta gradualmente en incrementos de 15%
-     * - Se mantiene cada velocidad al menos 30 segundos para permitir enfriamiento
-     * - En emergencia (>60 °C) se permite salto directo a máxima velocidad
+ * - La velocidad aumenta gradualmente en incrementos de 10%
+ * - La velocidad también baja gradualmente para evitar oscilaciones
+ * - Se mantiene cada velocidad al menos 30 segundos para permitir enfriamiento
+ * - El riesgo hardware sostenido acelera la rampa, sin salto directo
      */
-    private fun calculateRecommendedSpeed(temp: Float): Int {
+    private fun calculateRecommendedSpeed(temp: Float, isRiskConfirmed: Boolean): Int {
         val currentTime = System.currentTimeMillis()
         
         // Calcular velocidad objetivo ideal según temperatura
@@ -369,20 +387,9 @@ class ThermalMonitor(private val context: Context) {
             else -> 100
         }
         
-        // EMERGENCIA: Si temperatura es crítica (>60°C), saltar directamente a velocidad objetivo
-        if (temp >= TEMP_CRITICAL) {
-            if (targetSpeed != lastRecommendedSpeed) {
-                speedChangeCounter++
-                Log.w(TAG, "⚠️ EMERGENCIA: Temp: ${"%.1f".format(temp)}°C → Velocidad directa a $targetSpeed% (sin rampa)")
-            }
-            lastRecommendedSpeed = targetSpeed
-            currentTargetSpeed = targetSpeed
-            lastSpeedIncreaseTime = currentTime
-            timeAtCurrentSpeed = currentTime
-            return targetSpeed
-        }
-        
-        // RAMPA PROGRESIVA: Aumentar velocidad gradualmente
+        // RAMPA PROGRESIVA: nunca saltar bruscamente; acelerar solo con riesgo confirmado.
+        val increment = if (isRiskConfirmed) EMERGENCY_INCREMENT else SPEED_INCREMENT
+        val increaseDelay = if (isRiskConfirmed) EMERGENCY_INCREASE_DELAY else PROGRESSIVE_INCREASE_DELAY
         
         // Sí necesitamos aumentar velocidad
         if (targetSpeed > lastRecommendedSpeed) {
@@ -392,14 +399,15 @@ class ThermalMonitor(private val context: Context) {
             
             // Permitir incremento si:
             // 1. Hemos esperado el tiempo mínimo en esta velocidad (30 s)
-            // 2. Ha pasado el delay entre incrementos (20 s)
-            if (timeAtSpeed >= MIN_TIME_AT_SPEED && timeSinceLastIncrease >= PROGRESSIVE_INCREASE_DELAY) {
+            // 2. Ha pasado el delay entre incrementos (20 s normal, 10 s con riesgo sostenido)
+            if (timeAtSpeed >= MIN_TIME_AT_SPEED && timeSinceLastIncrease >= increaseDelay) {
                 // Incrementar gradualmente
-                val nextSpeed = (lastRecommendedSpeed + SPEED_INCREMENT).coerceAtMost(targetSpeed)
+                val nextSpeed = (lastRecommendedSpeed + increment).coerceAtMost(targetSpeed)
                 
                 if (nextSpeed != lastRecommendedSpeed) {
                     speedChangeCounter++
-                    Log.d(TAG, "📈 PROGRESIVO: Temp: ${"%.1f".format(temp)}°C → $lastRecommendedSpeed% → $nextSpeed% (objetivo: $targetSpeed%, tiempo en velocidad: ${timeAtSpeed/1000}s)")
+                    val mode = if (isRiskConfirmed) "RIESGO SOSTENIDO" else "PROGRESIVO"
+                    Log.d(TAG, "📈 $mode: Temp: ${"%.1f".format(temp)}°C → $lastRecommendedSpeed% → $nextSpeed% (objetivo: $targetSpeed%, tiempo en velocidad: ${timeAtSpeed/1000}s)")
                     lastRecommendedSpeed = nextSpeed
                     lastSpeedIncreaseTime = currentTime
                     timeAtCurrentSpeed = currentTime
@@ -411,7 +419,7 @@ class ThermalMonitor(private val context: Context) {
                 // Aún no es tiempo de incrementar, mantener velocidad actual
                 val remainingTime = maxOf(
                     (MIN_TIME_AT_SPEED - timeAtSpeed) / 1000,
-                    (PROGRESSIVE_INCREASE_DELAY - timeSinceLastIncrease) / 1000
+                    (increaseDelay - timeSinceLastIncrease) / 1000
                 )
                 if (remainingTime > 0 && remainingTime % 10L == 0L) {
                     Log.d(TAG, "⏳ Esperando ${remainingTime}s antes del próximo incremento (actual: $lastRecommendedSpeed%, objetivo: $targetSpeed%)")
@@ -419,19 +427,23 @@ class ThermalMonitor(private val context: Context) {
                 return lastRecommendedSpeed
             }
         }
-        // Sí necesitamos reducir velocidad (temperatura bajando)
+        // Sí necesitamos reducir velocidad: bajar gradualmente para evitar oscilaciones.
         else if (targetSpeed < lastRecommendedSpeed) {
-            // Permitir reducción inmediata cuando la temperatura baja
-            val speedDiff = lastRecommendedSpeed - targetSpeed
-            
-            // Solo reducir si la diferencia es significativa (>10%)
-            if (speedDiff >= MIN_SPEED_CHANGE) {
-                speedChangeCounter++
-                Log.d(TAG, "📉 REDUCCIÓN: Temp: ${"%.1f".format(temp)}°C → $lastRecommendedSpeed% → $targetSpeed%")
-                lastRecommendedSpeed = targetSpeed
-                timeAtCurrentSpeed = currentTime
-                return targetSpeed
+            val timeAtSpeed = currentTime - timeAtCurrentSpeed
+            val timeSinceLastChange = currentTime - lastSpeedIncreaseTime
+
+            if (timeAtSpeed >= MIN_TIME_AT_SPEED && timeSinceLastChange >= PROGRESSIVE_INCREASE_DELAY) {
+                val nextSpeed = (lastRecommendedSpeed - SPEED_INCREMENT).coerceAtLeast(targetSpeed)
+                if (nextSpeed != lastRecommendedSpeed) {
+                    speedChangeCounter++
+                    Log.d(TAG, "📉 REDUCCIÓN: Temp: ${"%.1f".format(temp)}°C → $lastRecommendedSpeed% → $nextSpeed% (objetivo: $targetSpeed%)")
+                    lastRecommendedSpeed = nextSpeed
+                    lastSpeedIncreaseTime = currentTime
+                    timeAtCurrentSpeed = currentTime
+                    return nextSpeed
+                }
             }
+            return lastRecommendedSpeed
         }
         
         // Mantener velocidad actual
@@ -439,11 +451,13 @@ class ThermalMonitor(private val context: Context) {
     }
     
     /**
-     * Calcula el intervalo adaptativo de monitoreo basado en el nivel de temperatura
-     * Intervalos reducidos para mejor respuesta del sistema progresivo
+     * Calcula el intervalo adaptativo de monitoreo basado en temperatura de control
+     * y, si existe, en el pico hardware detectado.
      */
-    fun getAdaptiveInterval(tempLevel: TempLevel): Long {
-        return when (tempLevel) {
+    fun getAdaptiveInterval(tempLevel: TempLevel, hardwarePeakTemp: Float = 0f): Long {
+        val signalLevel = tempLevelForSignal(hardwarePeakTemp)
+        val effectiveLevel = if (signalLevel.ordinal > tempLevel.ordinal) signalLevel else tempLevel
+        return when (effectiveLevel) {
             TempLevel.SAFE -> 45000L      // 45 segundos si seguro (reducido desde 60 s)
             TempLevel.WARM -> 20000L      // 20 segundos si tibio (reducido desde 30s)
             TempLevel.HOT -> 10000L       // 10 segundos si caliente (reducido desde 15 s)

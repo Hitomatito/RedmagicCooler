@@ -6,7 +6,6 @@ import android.util.Log
 import androidx.core.content.edit
 import com.hitomatito.redmagicooler.CoolerDeviceType
 import com.hitomatito.redmagicooler.model.CoolerProfile
-import com.hitomatito.redmagicooler.model.CoolerProfileData
 import com.hitomatito.redmagicooler.model.LightEffect
 import com.hitomatito.redmagicooler.model.RGBConfig
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,12 +25,10 @@ class ProfileRepository(context: Context) {
     private val _profiles = MutableStateFlow<List<CoolerProfile>>(emptyList())
     val profiles: StateFlow<List<CoolerProfile>> = _profiles.asStateFlow()
     
-    private val _activeProfileId = MutableStateFlow<String?>(null)
-    val activeProfileId: StateFlow<String?> = _activeProfileId.asStateFlow()
-    
     init {
+        // Migración: limpiar clave legada de perfil activo.
+        prefs.edit { remove(KEY_ACTIVE_PROFILE) }
         loadProfiles()
-        loadActiveProfileId()
     }
     
     /**
@@ -62,13 +59,6 @@ class ProfileRepository(context: Context) {
             Log.e(TAG, "Error cargando perfiles: ${e.message}", e)
             _profiles.value = emptyList()
         }
-    }
-    
-    /**
-     * Carga el ID del perfil activo
-     */
-    private fun loadActiveProfileId() {
-        _activeProfileId.value = prefs.getString(KEY_ACTIVE_PROFILE, null)
     }
     
     /**
@@ -107,11 +97,6 @@ class ProfileRepository(context: Context) {
         _profiles.value = updatedList.sortedByDescending { it.lastConnectedAt }
         saveProfiles()
         
-        // Si es el primer perfil, establecerlo como activo
-        if (_profiles.value.size == 1) {
-            setActiveProfile(profile.id)
-        }
-        
         Log.d(TAG, "Perfil agregado: ${profile.displayName} (${profile.macAddress})")
         return profile
     }
@@ -137,13 +122,6 @@ class ProfileRepository(context: Context) {
         val profile = _profiles.value.find { it.id == profileId }
         _profiles.value = _profiles.value.filter { it.id != profileId }
         saveProfiles()
-        
-        // Si era el perfil activo, seleccionar otro
-        if (_activeProfileId.value == profileId) {
-            _activeProfileId.value = _profiles.value.firstOrNull()?.id
-            prefs.edit { putString(KEY_ACTIVE_PROFILE, _activeProfileId.value) }
-        }
-        
         Log.d(TAG, "Perfil eliminado: ${profile?.displayName}")
     }
     
@@ -162,23 +140,6 @@ class ProfileRepository(context: Context) {
     }
     
     /**
-     * Establece el perfil activo
-     */
-    fun setActiveProfile(profileId: String?) {
-        _activeProfileId.value = profileId
-        prefs.edit { putString(KEY_ACTIVE_PROFILE, profileId) }
-        Log.d(TAG, "Perfil activo: $profileId")
-    }
-    
-    /**
-     * Obtiene el perfil activo
-     */
-    fun getActiveProfile(): CoolerProfile? {
-        val activeId = _activeProfileId.value ?: return null
-        return getProfile(activeId)
-    }
-    
-    /**
      * Actualiza el estado de conexión de un perfil
      */
     fun updateConnectionState(profileId: String, isConnected: Boolean, rssi: Int = 0) {
@@ -188,15 +149,6 @@ class ProfileRepository(context: Context) {
             signalStrength = rssi,
             lastConnectedAt = if (isConnected) System.currentTimeMillis() else profile.lastConnectedAt
         ))
-    }
-    
-    /**
-     * Desconecta todos los perfiles (para cuando se cierra la app)
-     */
-    fun disconnectAllProfiles() {
-        val updatedList = _profiles.value.map { it.copy(isConnected = false) }
-        _profiles.value = updatedList
-        saveProfiles()
     }
     
     /**
@@ -229,13 +181,6 @@ class ProfileRepository(context: Context) {
     fun renameProfile(profileId: String, newName: String) {
         val profile = getProfile(profileId) ?: return
         updateProfile(profile.copy(name = newName))
-    }
-    
-    /**
-     * Verifica si existe un perfil con la MAC dada
-     */
-    fun hasProfileWithMac(macAddress: String): Boolean {
-        return _profiles.value.any { it.macAddress == macAddress }
     }
     
     /**
@@ -301,7 +246,7 @@ class ProfileRepository(context: Context) {
         private const val PREFS_NAME = "cooler_profiles"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE_PROFILE = "active_profile"
-        
+
         @Volatile
         private var instance: ProfileRepository? = null
         

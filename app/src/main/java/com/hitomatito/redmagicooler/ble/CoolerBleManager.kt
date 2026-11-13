@@ -14,9 +14,9 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 
 import android.util.Log
+import androidx.core.content.edit
 import com.hitomatito.redmagicooler.utils.BleConnectionHelper
 import com.hitomatito.redmagicooler.CoolerDevice
-import com.hitomatito.redmagicooler.CoolerDeviceList
 import com.hitomatito.redmagicooler.CoolerDeviceType
 import com.hitomatito.redmagicooler.BlePermissionManager
 import com.hitomatito.redmagicooler.model.CoolerBleConstants
@@ -81,17 +81,9 @@ object CoolerBleManager {
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    private val _discoveredDevices = MutableStateFlow<List<CoolerDevice>>(emptyList())
-    val discoveredDevices: StateFlow<List<CoolerDevice>> = _discoveredDevices.asStateFlow()
-
     // -1 = desconocido todavía
     private val _fanSpeedPercent = MutableStateFlow(-1)
     val fanSpeedPercent: StateFlow<Int> = _fanSpeedPercent.asStateFlow()
-
-    // Byte crudo de la característica de temperatura (00001015). La escala exacta
-    // no está verificada aún; se expone cruda a propósito.
-    private val _temperatureRaw = MutableStateFlow(-1)
-    val temperatureRaw: StateFlow<Int> = _temperatureRaw.asStateFlow()
 
     private val _events = MutableSharedFlow<BleEvent>(extraBufferCapacity = 16)
     val events: SharedFlow<BleEvent> = _events.asSharedFlow()
@@ -111,7 +103,6 @@ object CoolerBleManager {
     @Volatile
     private var isConnected = false
     private var bluetoothLeScanner: android.bluetooth.le.BluetoothLeScanner? = null
-    private val deviceList = CoolerDeviceList()
 
     @Volatile
     private var fanCharacteristic: BluetoothGattCharacteristic? = null
@@ -135,6 +126,7 @@ object CoolerBleManager {
         val value: ByteArray,
         override val label: String
     ) : GattOp {
+        @SuppressLint("MissingPermission")
         @Suppress("DEPRECATION")
         override fun execute(gatt: BluetoothGatt): Boolean {
             characteristic.value = value
@@ -147,6 +139,7 @@ object CoolerBleManager {
         val value: ByteArray,
         override val label: String
     ) : GattOp {
+        @SuppressLint("MissingPermission")
         @Suppress("DEPRECATION")
         override fun execute(gatt: BluetoothGatt): Boolean {
             descriptor.value = value
@@ -158,6 +151,7 @@ object CoolerBleManager {
         val characteristic: BluetoothGattCharacteristic,
         override val label: String
     ) : GattOp {
+        @SuppressLint("MissingPermission")
         override fun execute(gatt: BluetoothGatt): Boolean =
             gatt.readCharacteristic(characteristic)
     }
@@ -181,7 +175,6 @@ object CoolerBleManager {
     private var reconnectBackoffMs = 2000L
 
     val connectedDevice: CoolerDevice? get() = connectedCoolerDevice
-    val discoveryTimedOut: Boolean get() = discoveryTimedOutFlag
     @Volatile private var discoveryTimedOutFlag = false
 
     /** Inicialización idempotente; llamar desde Application/MainActivity/CoolerService. */
@@ -236,8 +229,6 @@ object CoolerBleManager {
         }
         scanTargetMac = targetMac
         scanTargetType = targetType
-        deviceList.clear()
-        _discoveredDevices.value = emptyList()
 
         val settings = ScanSettings.Builder()
             .setScanMode(if (lowLatency) ScanSettings.SCAN_MODE_LOW_LATENCY else ScanSettings.SCAN_MODE_LOW_POWER)
@@ -338,6 +329,7 @@ object CoolerBleManager {
         discoveryTimedOutFlag = false
 
         bluetoothGatt = try {
+            @Suppress("DEPRECATION")
             device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } catch (e: Exception) {
             Log.e(TAG, "Error connectGatt: ${e.message}", e)
@@ -379,7 +371,6 @@ object CoolerBleManager {
         autoModeCharacteristic = null
         temperatureCharacteristic = null
         _fanSpeedPercent.value = -1
-        _temperatureRaw.value = -1
         discoveryTimeoutJob?.cancel()
         discoveryTimeoutJob = null
     }
@@ -428,8 +419,6 @@ object CoolerBleManager {
             WriteCharacteristicOp(characteristic, byteArrayOf(command), "auto mode 0x%02x".format(command))
         )
     }
-
-    fun isAutoModeAvailable(): Boolean = autoModeCharacteristic != null
 
     /** Encola una operación en la cola FIFO del GATT. Devuelve false si no hay conexión. */
     private fun enqueueOp(op: GattOp): Boolean {
@@ -779,7 +768,6 @@ object CoolerBleManager {
             }
             CoolerBleConstants.TEMPERATURE_NOTIFICATION_UUID -> {
                 val raw = data[0].toInt() and 0xFF
-                _temperatureRaw.value = raw
                 _events.tryEmit(BleEvent.TemperatureRaw(raw))
                 Log.d(TAG, "Temperature raw: $raw")
             }
@@ -809,14 +797,6 @@ object CoolerBleManager {
                 ?: scanTargetType?.takeIf { it.matchesBleName(deviceName) }
                 ?: return
 
-            val coolerDevice = CoolerDevice(
-                bluetoothDevice = device,
-                deviceType = type,
-                rssi = rssi
-            )
-            deviceList.addOrUpdate(coolerDevice)
-            _discoveredDevices.value = deviceList.getAll()
-
             // Conectar al primer cooler encontrado (comportamiento de la app original:
             // si la UI no pidió MAC concreta, acepta cualquier cooler válido)
             if (_state.value == ConnectionState.SCANNING) {
@@ -833,9 +813,6 @@ object CoolerBleManager {
             _events.tryEmit(BleEvent.ConnectionFailed("Error de escaneo ($errorCode)"))
         }
     }
-
-    /** Lista actual de coolers descubiertos (por señal descendente). */
-    fun getDiscoveredDevices(): List<CoolerDevice> = deviceList.getAll()
 
     // ------------------------------------------------ reconexión
 
@@ -886,10 +863,10 @@ object CoolerBleManager {
             return
         }
 
-        prefs.edit()
-            .putInt(KEY_DEAD_OBJECT_COUNT, count + 1)
-            .putString(KEY_DEAD_OBJECT_DATE, today)
-            .apply()
+        prefs.edit {
+            putInt(KEY_DEAD_OBJECT_COUNT, count + 1)
+            putString(KEY_DEAD_OBJECT_DATE, today)
+        }
 
         Log.w(TAG, "DeadObjectException (${count + 1}/$MAX_DEAD_OBJECT_PER_DAY hoy): cerrando GATT y reconectando")
         closeGattInternal()
@@ -899,10 +876,4 @@ object CoolerBleManager {
     fun isHealthy(): Boolean = isConnected && fanCharacteristic != null
 
     fun currentConnectedAddress(): String? = connectedCoolerDevice?.address
-
-    /** Vuelve a detectar un dispositivo antes de conectar. */
-    fun setScanTarget(mac: String?, type: CoolerDeviceType?) {
-        scanTargetMac = mac
-        scanTargetType = type
-    }
 }

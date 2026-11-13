@@ -66,11 +66,11 @@ import kotlin.time.Duration.Companion.milliseconds
 @Composable
 fun HomeScreen(
     profiles: List<CoolerProfile>,
-    connectionError: String? = null,
-    onDismissError: () -> Unit = {},
     onProfileClick: (CoolerProfile) -> Unit,
     onAddDevice: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    connectionError: String? = null,
+    onDismissError: () -> Unit = {}
 ) {
     val showError = remember(connectionError) { connectionError != null }
     LaunchedEffect(connectionError) {

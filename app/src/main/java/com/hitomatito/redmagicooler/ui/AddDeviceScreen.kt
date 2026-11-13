@@ -64,12 +64,12 @@ fun AddDeviceScreen(
     isScanning: Boolean,
     isConnecting: Boolean,
     statusMessage: String,
-    connectionError: String? = null,
-    onDismissError: () -> Unit = {},
     onCancelScan: () -> Unit,
     onProfileCreated: (String) -> Unit,
     newlyCreatedProfileId: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    connectionError: String? = null,
+    onDismissError: () -> Unit = {}
 ) {
     // Detectar cuando se crea un perfil nuevo y navegar automáticamente
     LaunchedEffect(newlyCreatedProfileId) {

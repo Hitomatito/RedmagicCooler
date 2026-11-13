@@ -86,9 +86,9 @@ fun ProfileConfigScreen(
     onDisconnect: () -> Unit,
     onDeleteProfile: () -> Unit,
     onRenameProfile: (String) -> Unit,
+    modifier: Modifier = Modifier,
     connectionError: String? = null,
-    onDismissError: () -> Unit = {},
-    modifier: Modifier = Modifier
+    onDismissError: () -> Unit = {}
 ) {
     var fanSpeed by remember(profile.fanSpeed) { mutableIntStateOf(profile.fanSpeed) }
     var isApplying by remember { mutableStateOf(false) }

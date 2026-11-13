@@ -1,5 +1,6 @@
 package com.hitomatito.redmagicooler
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.app.Activity
 import android.app.AlarmManager
@@ -91,6 +92,7 @@ object BlePermissionManager {
     /**
      * Permisos Bluetooth de Android 12+ (API 31+)
      */
+    @SuppressLint("InlinedApi")
     private val BLUETOOTH_PERMISSIONS = arrayOf(
         Manifest.permission.BLUETOOTH_CONNECT,
         Manifest.permission.BLUETOOTH_SCAN,
@@ -287,13 +289,6 @@ object BlePermissionManager {
     }
 
     /**
-     * Verifica si todos los permisos de runtime están concedidos
-     */
-    fun hasAllPermissions(context: Context): Boolean {
-        return getRequiredPermissions().all { isGranted(context, it) }
-    }
-
-    /**
      * Verifica si los permisos BLE críticos están concedidos (excluye permisos opcionales como notificaciones)
      * Útil para servicios en background donde algunos permisos son opcionales
      */
@@ -348,13 +343,6 @@ object BlePermissionManager {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
             ?: return false
         return alarmManager.canScheduleExactAlarms()
-    }
-
-    /**
-     * Obtiene un mensaje descriptivo de los permisos faltantes
-     */
-    fun getMissingPermissionsMessage(context: Context): String {
-        return buildMessage(getMissingPermissions(context), context)
     }
 
     // ---------------------------------------------------------------------
