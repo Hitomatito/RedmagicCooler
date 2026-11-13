@@ -1,19 +1,8 @@
 package com.hitomatito.redmagicooler
 
-import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -34,8 +23,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.hitomatito.redmagicooler.ble.CoolerBleManager
 import com.hitomatito.redmagicooler.data.ProfileRepository
-import com.hitomatito.redmagicooler.model.CoolerBleConstants
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
 import com.hitomatito.redmagicooler.model.RGBConfig
@@ -45,24 +34,20 @@ import com.hitomatito.redmagicooler.ui.HomeScreen
 import com.hitomatito.redmagicooler.ui.ProfileConfigScreen
 import com.hitomatito.redmagicooler.ui.RGBControlScreen
 import com.hitomatito.redmagicooler.ui.theme.RedmagiCoolerTheme
-import com.hitomatito.redmagicooler.utils.BleConnectionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 
 @Suppress("OVERRIDE_DEPRECATION")
 class MainActivity : ComponentActivity() {
     private lateinit var bluetoothAdapter: BluetoothAdapter
-    private var bluetoothGatt: BluetoothGatt? = null
-    private var bluetoothLeScanner: BluetoothLeScanner? = null
-    private var isScanning = false
-    
-    private var fanCharacteristic: BluetoothGattCharacteristic? = null
-    private var lightCharacteristic: BluetoothGattCharacteristic? = null
+    // La conexión BLE la posee CoolerBleManager (propietario único).
+    // Esta actividad actúa como cliente: observa estado y emite comandos.
+    private var isScanning by mutableStateOf(false)
 
     // Estados observables para la UI
     private var isConnected by mutableStateOf(false)
@@ -81,23 +66,8 @@ class MainActivity : ComponentActivity() {
     private var pendingDeviceName by mutableStateOf<String?>(null)
     private var pendingDeviceRssi by mutableIntStateOf(0)
 
-    // MAC concreta a la que conectar durante la reconexión de un perfil guardado.
-    // null = aceptar cualquier dispositivo cuyo nombre coincida (dispositivo nuevo).
-    private var scanTargetMac: String? = null
-    
     // Perfil recién creado (para navegación automática)
     private var newlyCreatedProfileId by mutableStateOf<String?>(null)
-    
-    // Contador de reintentos para discovery de servicios
-    private var discoveryRetryCount = 0
-    private val maxDiscoveryRetries = 2
-    
-    // Flags para manejo de status 22 (GATT_CONN_TERMINATE_LOCAL_HOST) y timeout
-    private var isDiscoveryInProgress = false
-    private var isDiscoveryTimedOut = false
-    private var discoveryTimeoutJob: Job? = null
-    private var status22ReconnectAttempts = 0
-    private val maxStatus22Reconnects = 3
     
     // Monitor térmico y modo automático
     private lateinit var thermalMonitor: ThermalMonitor
@@ -114,18 +84,6 @@ class MainActivity : ComponentActivity() {
     
     companion object {
         private const val TAG = "RedMagicCooler"
-        
-        // Rango real del hardware del cooler
-        private const val COOLER_MIN_SPEED = 40
-        private const val COOLER_MAX_SPEED = 80
-        
-        fun mapPercentToRaw(percent: Int): Int {
-            return COOLER_MIN_SPEED + (percent * (COOLER_MAX_SPEED - COOLER_MIN_SPEED) / 100)
-        }
-        
-        fun mapRawToPercent(raw: Int): Int {
-            return ((raw - COOLER_MIN_SPEED) * 100) / (COOLER_MAX_SPEED - COOLER_MIN_SPEED)
-        }
     }
 
     private fun isServiceRunning(serviceClass: Class<*>): Boolean {
@@ -141,7 +99,7 @@ class MainActivity : ComponentActivity() {
     
     /**
      * Verifica y limpia estados inconsistentes del servicio
-     * Si el servicio no está corriendo pero hay perfiles en modo auto, los limpia
+     * Si el servicio no está corriendo, pero hay perfiles en modo auto, los limpia
      */
     private fun verifyAndCleanServiceState() {
         val isServiceRunning = isServiceRunning(CoolerService::class.java)
@@ -169,19 +127,43 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val requestPermissionsLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val denied = permissions.filter { !it.value }.keys
-        
-        if (denied.isEmpty()) {
-            Log.d(TAG, "Todos los permisos concedidos")
-            statusMessage = "Listo para buscar dispositivos"
-        } else {
-            Log.e(TAG, "Permisos DENEGADOS: $denied")
-            statusMessage = "Permisos denegados"
-            Toast.makeText(this, "Se requieren todos los permisos para funcionar", Toast.LENGTH_LONG).show()
+    init {
+        // El launcher de permisos vive centralizado en BlePermissionManager.
+        // Debe registrarse antes de que la Activity llegue a STARTED, por eso va
+        // en un init y no en onCreate. Asi mantiene el orden activity_rq#0.
+        BlePermissionManager.register(this)
+    }
+
+    /**
+     * Reacción unificada a la falta de un permiso BLE: registra el motivo,
+     * informa al usuario y vuelve a pedir los permisos que falten.
+     *
+     * Antes de centralizar esto, cada call site hacia un "return" silencioso y
+     * la app quedaba con la UI de "conectado" sin hacer nada.
+     */
+    private fun handleMissingBlePermission(reason: String) {
+        Log.w(TAG, "Permiso BLE faltante: $reason")
+        statusMessage = reason
+        connectionError = "Se perdieron los permisos de Bluetooth.\n" +
+            "Reactivá los permisos para controlar el cooler."
+
+        // Evitar diálogos duplicados si el usuario sigue interactuando.
+        if (!BlePermissionManager.isRequestInFlight) {
+            BlePermissionManager.requestPermissions(this) { result ->
+                if (!result.granted) {
+                    Log.e(TAG, "Permisos siguen denegados: ${result.denied}")
+                }
+            }
         }
+    }
+
+    /**
+     * Manejo unificado de SecurityException: el permiso BLUETOOTH_CONNECT se
+     * revocó mientras la app estaba en uso.
+     */
+    private fun handleSecurityException(e: SecurityException, operation: String) {
+        Log.e(TAG, "SecurityException en $operation: ${e.message}")
+        handleMissingBlePermission("Permiso de Bluetooth revocado")
     }
 
     private val bluetoothEnableLauncher = registerForActivityResult(
@@ -223,17 +205,24 @@ class MainActivity : ComponentActivity() {
         bluetoothAdapter = bluetoothManager.adapter
         showBluetoothRequired = !bluetoothAdapter.isEnabled
         
-        // Solicitar permisos al inicio
-        if (!BlePermissionManager.hasAllPermissions(this)) {
-            val missing = BlePermissionManager.getMissingPermissions(this)
-            val requestable = missing.filter { it != "android.permission.SCHEDULE_EXACT_ALARM" }
-            if (requestable.isNotEmpty()) {
-                requestPermissionsLauncher.launch(requestable.toTypedArray())
+        // Solicitar permisos al inicio (centralizado en BlePermissionManager)
+        BlePermissionManager.requestPermissions(this) { result ->
+            if (result.granted) {
+                Log.d(TAG, "Todos los permisos concedidos")
+                statusMessage = "Listo para buscar dispositivos"
+            } else {
+                Log.e(TAG, "Permisos DENEGADOS: ${result.denied}")
+                statusMessage = "Permisos denegados"
+                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
             }
         }
         
         // Inicializar monitor térmico
         thermalMonitor = ThermalMonitor(this)
+
+        // Motor BLE: propietario único de la conexión (compartido con CoolerService)
+        CoolerBleManager.init(this)
+        observeBleEvents()
 
         setContent {
             RedmagiCoolerTheme {
@@ -377,11 +366,64 @@ class MainActivity : ComponentActivity() {
      * Conecta a un perfil existente
      */
     @RequiresApi(Build.VERSION_CODES.S)
-    private fun connectToProfile(profile: CoolerProfile, isRetry: Boolean = false) {
-        // Un intento manual empieza con el contador a cero; los reintentos automáticos no
-        if (!isRetry) {
-            status22ReconnectAttempts = 0
+    /**
+     * Traduce los eventos del motor BLE al estado de la UI.
+     */
+    private fun observeBleEvents() {
+        monitoringScope.launch {
+            CoolerBleManager.state.collect { managerState ->
+                isConnected = managerState == CoolerBleManager.ConnectionState.CONNECTED
+                isScanning = managerState == CoolerBleManager.ConnectionState.SCANNING
+            }
         }
+        monitoringScope.launch {
+            CoolerBleManager.fanSpeedPercent.collect { percent ->
+                if (percent >= 0) {
+                    currentCoolerSpeed = percent
+                }
+            }
+        }
+        monitoringScope.launch {
+            CoolerBleManager.events.collect { event ->
+                when (event) {
+                    is CoolerBleManager.BleEvent.Connected -> {
+                        Log.d(TAG, "Cooler conectado: ${event.device.deviceType.deviceName}")
+                        pendingDeviceMac = event.device.address
+                        pendingDeviceName = event.device.bleName
+                        pendingDeviceRssi = event.device.rssi
+                        pendingNewDeviceType = event.device.deviceType
+                        isConnecting = false
+                        statusMessage = "Conectado"
+                        handleSuccessfulConnection()
+                    }
+                    is CoolerBleManager.BleEvent.Disconnected -> {
+                        Log.d(TAG, "Cooler desconectado (status=${event.status})")
+                        statusMessage = "Desconectado"
+                        currentCoolerSpeed = 0
+                        currentConnectedProfileId?.let { pid ->
+                            profileRepository.updateConnectionState(pid, false)
+                        }
+                        currentConnectedProfileId = null
+                        isConnecting = false
+                    }
+                    is CoolerBleManager.BleEvent.FanSpeedChanged -> Unit // gestionado por el flow de estado
+                    is CoolerBleManager.BleEvent.TemperatureRaw ->
+                        Log.d(TAG, "Temperatura cruda del cooler: ${event.raw}")
+                    is CoolerBleManager.BleEvent.ConnectionFailed -> {
+                        Log.w(TAG, "Error de conexión: ${event.reason}")
+                        connectionError = event.reason
+                        statusMessage = "Error: ${event.reason}"
+                        isConnecting = false
+                        isScanning = false
+                    }
+                    is CoolerBleManager.BleEvent.DiscoveryRetry ->
+                        statusMessage = "Reintentando descubrimiento de servicios (${event.attempt}/${event.max})..."
+                }
+            }
+        }
+    }
+
+    private fun connectToProfile(profile: CoolerProfile) {
         if (!bluetoothAdapter.isEnabled) {
             statusMessage = "Bluetooth desactivado"
             Toast.makeText(this, "Por favor, activa Bluetooth primero", Toast.LENGTH_SHORT).show()
@@ -393,59 +435,18 @@ class MainActivity : ComponentActivity() {
             return
         }
         
-        // Si hay otra conexión activa, desconectar primero
+        // Sí hay otra conexión activa, desconectar primero
         if (isConnected && currentConnectedProfileId != profile.id) {
             disconnectFromCooler()
         }
         
         pendingConnectionProfileId = profile.id
         pendingNewDeviceType = profile.deviceType
+        connectionError = null
 
         // Escanear antes de conectar, como la app oficial: el dispositivo obtenido
         // por escaneo tiene el tipo de dirección BLE resuelto y el discovery responde.
-        scanTargetMac = profile.macAddress.ifBlank { null }
-        startScanForDevice(profile.deviceType)
-    }
-
-    /**
-     * Conecta directamente por dirección MAC conocida
-     */
-    @SuppressLint("MissingPermission")
-    private fun connectDirectlyByMac(macAddress: String, deviceType: CoolerDeviceType) {
-        try {
-            if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                statusMessage = "Permisos BLE requeridos"
-                return
-            }
-            
-            isConnecting = true
-            statusMessage = "Conectando a ${deviceType.deviceName}..."
-            
-            val device = bluetoothAdapter.getRemoteDevice(macAddress)
-            
-            // Limpiar conexión anterior
-            BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
-            bluetoothGatt = null
-            fanCharacteristic = null
-            lightCharacteristic = null
-            
-            bluetoothGatt = device.connectGatt(
-                this,
-                false,  // Conexión directa: autoConnect=true ralentiza el descubrimiento de servicios
-                gattCallback,
-                BluetoothDevice.TRANSPORT_LE
-            )
-            
-            Log.d(TAG, "Intentando conexión directa a: $macAddress")
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error en conexión directa: ${e.message}", e)
-            statusMessage = "Error: ${e.message}"
-            isConnecting = false
-            
-            // Fallback: escanear para encontrar
-            startScanForDevice(deviceType)
-        }
+        startScanForDevice(profile.deviceType, profile.macAddress.ifBlank { null })
     }
 
     /**
@@ -454,30 +455,29 @@ class MainActivity : ComponentActivity() {
     private fun startScanForNewDevice(deviceType: CoolerDeviceType) {
         Log.d(TAG, "startScanForNewDevice: ${deviceType.deviceName}")
         
-        // Verificar solo permisos críticos de BLE (sin SCHEDULE_EXACT_ALARM)
-        if (!BlePermissionManager.hasCriticalBlePermissions(this)) {
-            Log.w(TAG, "Faltan permisos BLE criticos")
-            val missing = BlePermissionManager.getMissingPermissions(this)
-            Log.d(TAG, "Permisos faltantes: ${missing.joinToString()}")
-            val requestable = missing.filter { it != "android.permission.SCHEDULE_EXACT_ALARM" }
-            if (requestable.isNotEmpty()) {
-                requestPermissionsLauncher.launch(requestable.toTypedArray())
+        // Pedir los permisos imprescindibles para escanear (centralizado en
+        // BlePermissionManager). Si ya estan concedidos, el callback se invoca
+        // de inmediato y el escaneo sigue sin pedir nada.
+        BlePermissionManager.requestCriticalBlePermissions(this) { result ->
+            if (result.granted) {
+                Log.d(TAG, "Todos los permisos BLE criticos disponibles")
+                pendingNewDeviceType = deviceType
+                pendingConnectionProfileId = null // Es un nuevo dispositivo
+                startScanForDevice(deviceType)
+            } else {
+                Log.e(TAG, "Permisos BLE criticos denegados: ${result.denied}")
+                statusMessage = "Permisos denegados"
+                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
             }
-            return
         }
-        
-        Log.d(TAG, "Todos los permisos BLE criticos disponibles")
-        
-        pendingNewDeviceType = deviceType
-        pendingConnectionProfileId = null // Es un nuevo dispositivo
-        scanTargetMac = null
-        startScanForDevice(deviceType)
     }
 
     /**
-     * Inicia escaneo para un tipo de dispositivo
+     * Inicia escaneo para un tipo de dispositivo.
+     * El motor BLE aplica la detección por protocolo real (service 00004a41 + manufacturer 2250)
+     * y conecta automáticamente al primer cooler encontrado.
      */
-    private fun startScanForDevice(deviceType: CoolerDeviceType) {
+    private fun startScanForDevice(deviceType: CoolerDeviceType, targetMac: String? = null) {
         Log.d(TAG, "startScanForDevice: ${deviceType.deviceName}")
         
         if (isScanning) {
@@ -487,8 +487,7 @@ class MainActivity : ComponentActivity() {
         
         try {
             if (!BlePermissionManager.hasBluetoothScanPermission(this)) {
-                Log.e(TAG, "Permiso de escaneo BLE faltante")
-                statusMessage = "Permiso de escaneo requerido"
+                handleMissingBlePermission("Permiso de escaneo Bluetooth requerido")
                 return
             }
             
@@ -496,38 +495,14 @@ class MainActivity : ComponentActivity() {
             statusMessage = "Buscando ${deviceType.deviceName}..."
             Log.d(TAG, "Estado actualizado: isConnecting=true, statusMessage=$statusMessage")
             
-            // Limpiar estado anterior
-            if (bluetoothGatt != null) {
-                BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
-                bluetoothGatt = null
-            }
-            fanCharacteristic = null
-            lightCharacteristic = null
-            
-            bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
-            if (bluetoothLeScanner == null) {
-                Log.e(TAG, "BluetoothLeScanner es null")
-                statusMessage = "Escáner BLE no disponible"
-                isConnecting = false
-                return
-            }
-            Log.d(TAG, "BluetoothLeScanner obtenido")
-            
-            val scanSettings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                .build()
-            
-            isScanning = true
-            
-            @SuppressLint("MissingPermission")
-            bluetoothLeScanner?.startScan(null, scanSettings, bleScanCallback)
+            // El motor BLE cierra la conexión anterior si la hay
+            CoolerBleManager.startScan(lowLatency = true, targetMac = targetMac, targetType = deviceType)
             
             Log.d(TAG, "Escaneo iniciado para: ${deviceType.deviceName}")
             
             // Timeout de 20 segundos
             monitoringScope.launch {
-                delay(20000)
+                delay(20000.milliseconds)
                 if (isFinishing || isDestroyed) return@launch
                 
                 if (isScanning) {
@@ -541,6 +516,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
             
+        } catch (e: SecurityException) {
+            handleSecurityException(e, "inicio de escaneo")
+            isConnecting = false
+            isScanning = false
         } catch (e: Exception) {
             Log.e(TAG, "Error iniciando escaneo: ${e.message}", e)
             statusMessage = "Error: ${e.message}"
@@ -553,12 +532,9 @@ class MainActivity : ComponentActivity() {
      * Cancela el escaneo actual
      */
     private fun cancelScan() {
-        if (isScanning) {
-            BleConnectionHelper.safeStopScan(bluetoothLeScanner, bleScanCallback, TAG)
-            isScanning = false
-        }
+        CoolerBleManager.stopScan()
+        isScanning = false
         isConnecting = false
-        scanTargetMac = null
         statusMessage = "Escaneo cancelado"
     }
     
@@ -581,280 +557,18 @@ class MainActivity : ComponentActivity() {
         }
     }
     
-    private val bleScanCallback = object : ScanCallback() {
-        @SuppressLint("MissingPermission")
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device
-            val deviceName = device.name ?: "Unknown"
-            
-            val serviceUuids = result.scanRecord?.serviceUuids?.joinToString(", ") { it.toString() } ?: "ninguno"
-            Log.d(TAG, "BLE Device: $deviceName [${device.address}] RSSI: ${result.rssi} dBm")
-            Log.d(TAG, "   UUIDs: $serviceUuids")
-
-            // Al reconectar un perfil, ignorar otros coolers del mismo modelo
-            val targetMac = scanTargetMac
-            if (targetMac != null && !device.address.equals(targetMac, ignoreCase = true)) {
-                return
-            }
-            
-            val isNameMatch = deviceName.contains("Magcooler", ignoreCase = true) || 
-                              deviceName.contains("RM ", ignoreCase = true) ||
-                              deviceName.contains("RedMagic", ignoreCase = true) ||
-                              deviceName.contains("Heat", ignoreCase = true) ||
-                              deviceName.contains("Cooler", ignoreCase = true)
-            
-            if (isNameMatch) {
-                if (!isScanning) {
-                    Log.d(TAG, "Ignorando scan result duplicado - ya conectando")
-                    return
-                }
-                isScanning = false
-                bluetoothLeScanner?.stopScan(this)
-                
-                // Guardar info del dispositivo encontrado
-                pendingDeviceMac = device.address
-                pendingDeviceName = deviceName
-                pendingDeviceRssi = result.rssi
-                
-                Log.d(TAG, "Dispositivo Compatible Encontrado: $deviceName [${device.address}]")
-                
-                runOnUiThread {
-                    statusMessage = "Conectando a $deviceName..."
-                }
-                
-                // Cerrar conexión GATT anterior
-                bluetoothGatt?.let { oldGatt ->
-                    try {
-                        BleConnectionHelper.safeCloseGatt(oldGatt, TAG)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error cerrando GATT anterior: ${e.message}")
-                    }
-                }
-                
-                // Usar autoConnect=false como la app original de RedMagic
-                // autoConnect=true puede causar problemas con el discovery de servicios
-                bluetoothGatt = device.connectGatt(
-                    this@MainActivity,
-                    false,  // ← Cambiado de true a false
-                    gattCallback,
-                    BluetoothDevice.TRANSPORT_LE
-                )
-            }
-        }
-        
-        override fun onScanFailed(errorCode: Int) {
-            isScanning = false
-            val errorMsg = when (errorCode) {
-                SCAN_FAILED_ALREADY_STARTED -> "Escaneo ya iniciado"
-                SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "Error de registro"
-                SCAN_FAILED_INTERNAL_ERROR -> "Error interno"
-                SCAN_FAILED_FEATURE_UNSUPPORTED -> "No soportado"
-                else -> "Error ($errorCode)"
-            }
-            Log.e(TAG, "Escaneo falló: $errorMsg")
-            runOnUiThread {
-                isConnecting = false
-                statusMessage = "Error: $errorMsg"
-                Toast.makeText(this@MainActivity, "Error de escaneo: $errorMsg", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    /**
-     * Maneja timeout de discoverServices() - cierra GATT y reintenta conexión
-     */
-    private fun handleDiscoverServicesTimeout() {
-        discoveryTimeoutJob = null
-        // Tras una desconexión manual currentConnectedProfileId es null, pero el
-        // perfil pendiente permite reintentar (como hace la app oficial).
-        val profileId = currentConnectedProfileId ?: pendingConnectionProfileId
-        BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
-        bluetoothGatt = null
-        fanCharacteristic = null
-        lightCharacteristic = null
-        isConnected = false
-        
-        // Mostrar error al usuario inmediatamente, no tras agotar reintentos
-        connectionError = "No se pudo conectar al cooler.\nVerificá que esté encendido y cerca del teléfono."
-        if (profileId != null && status22ReconnectAttempts < maxStatus22Reconnects) {
-            status22ReconnectAttempts++
-            val attempt = status22ReconnectAttempts
-            Log.w(TAG, "Reintentando conexión tras timeout ($attempt/$maxStatus22Reconnects)...")
-            connectionError = "El cooler no responde.\nReintentando ($attempt/$maxStatus22Reconnects)..."
-            val backoffMs = 2000L
-            monitoringScope.launch {
-                delay(backoffMs)
-                if (isFinishing || isDestroyed) return@launch
-                runOnUiThread {
-                    val profile = profileRepository.getProfile(profileId)
-                    if (profile != null) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            connectToProfile(profile, isRetry = true)
-                        } else {
-                            Log.w(TAG, "API level insuficiente para reconectar tras timeout")
-                            statusMessage = "Error: API no compatible para reconexión"
-                            status22ReconnectAttempts = 0
-                        }
-                    } else {
-                        statusMessage = "Error al reconectar tras timeout"
-                        status22ReconnectAttempts = 0
-                    }
-                }
-            }
-        } else {
-            statusMessage = "Error: tiempo de conexión agotado"
-            connectionError = "El cooler no responde al conectar.\n" +
-                "Desactiva y activa el Bluetooth del teléfono y vuelve a intentarlo."
-            currentConnectedProfileId?.let { pid ->
-                profileRepository.updateConnectionState(pid, false)
-            }
-            currentConnectedProfileId = null
-            status22ReconnectAttempts = 0
-        }
-    }
-
-    private fun processDiscoveredServices(gatt: BluetoothGatt, services: List<BluetoothGattService>) {
-        // El discovery respondió: la conexión es válida y se resetea el contador de reintentos
-        status22ReconnectAttempts = 0
-        if (services.isEmpty() && discoveryRetryCount < maxDiscoveryRetries) {
-            discoveryRetryCount++
-            Log.w(TAG, "Lista de servicios vacia - Reintentando discovery ($discoveryRetryCount/$maxDiscoveryRetries)...")
-            statusMessage = "Reintentando descubrimiento ($discoveryRetryCount/$maxDiscoveryRetries)..."
-            
-            monitoringScope.launch {
-                delay(1500L)
-                if (isFinishing || isDestroyed || !isConnected) return@launch
-                runOnUiThread {
-                    try {
-                        @SuppressLint("MissingPermission")
-                        if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                            Log.d(TAG, "Reintentando discoverServices()...")
-                            gatt.discoverServices()
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error en reintento de discovery: ${e.message}")
-                        statusMessage = "Error en reintento"
-                    }
-                }
-            }
-            return
-        }
-        
-        services.forEachIndexed { index, service ->
-            Log.d(TAG, "Servicio #${index + 1}: ${service.uuid}")
-            service.characteristics.forEach { ch ->
-                val props = mutableListOf<String>()
-                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) props.add("READ")
-                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) props.add("WRITE")
-                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) props.add("WRITE_NO_RESPONSE")
-                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) props.add("NOTIFY")
-                if (ch.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) props.add("INDICATE")
-                Log.d(TAG, "   └─ Characteristic: ${ch.uuid}")
-                Log.d(TAG, "      Properties: ${props.joinToString(", ")}")
-            }
-        }
-        
-        Log.d(TAG, "Buscando servicio del fan: ${CoolerBleConstants.FAN_SERVICE_UUID}")
-        
-        var fanService = gatt.getService(CoolerBleConstants.FAN_SERVICE_UUID)
-        if (fanService != null) {
-            Log.d(TAG, "Servicio del fan encontrado directamente")
-            fanCharacteristic = fanService.getCharacteristic(CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID)
-            lightCharacteristic = fanService.getCharacteristic(CoolerBleConstants.LIGHT_CONTROL_UUID)
-        } else {
-            Log.d(TAG, "Servicio del fan NO encontrado, buscando características en todos los servicios...")
-            for (service in gatt.services ?: emptyList()) {
-                val fanChar = service.getCharacteristic(CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID)
-                if (fanChar != null) {
-                    fanCharacteristic = fanChar
-                    fanService = service
-                    Log.d(TAG, "Fan characteristic encontrada en servicio: ${service.uuid}")
-                }
-                val lightChar = service.getCharacteristic(CoolerBleConstants.LIGHT_CONTROL_UUID)
-                if (lightChar != null) {
-                    lightCharacteristic = lightChar
-                    Log.d(TAG, "Light characteristic encontrada en servicio: ${service.uuid}")
-                }
-                if (fanCharacteristic != null && lightCharacteristic != null) break
-            }
-        }
-        
-        if (fanCharacteristic != null) {
-            statusMessage = "Listo para controlar"
-            Toast.makeText(this@MainActivity, "Conectado exitosamente", Toast.LENGTH_SHORT).show()
-            
-            handleSuccessfulConnection()
-            thermalMonitor.startAmbientSensor()
-            startThermalMonitoring()
-            
-            try {
-                if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                    return
-                }
-                @SuppressLint("MissingPermission")
-                gatt.setCharacteristicNotification(fanCharacteristic, true)
-                @SuppressLint("MissingPermission")
-                gatt.readCharacteristic(fanCharacteristic)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error habilitando notificaciones: ${e.message}")
-            }
-        } else {
-            if (services.isEmpty()) {
-                statusMessage = "Error: No se pudieron obtener servicios del dispositivo"
-                Log.e(TAG, "Lista de servicios vacia despues de $discoveryRetryCount reintentos")
-                Toast.makeText(this@MainActivity, 
-                    "No se pudieron obtener los servicios BLE del dispositivo. Intenta:\n" +
-                    "1. Apagar y encender el cooler\n" +
-                    "2. Acercarlo mas al telefono\n" +
-                    "3. Reiniciar Bluetooth", 
-                    Toast.LENGTH_LONG).show()
-            } else {
-                statusMessage = "Error: Características no encontradas"
-                Log.e(TAG, "Fan characteristic NO encontrada")
-                Log.e(TAG, "   Buscada: ${CoolerBleConstants.FAN_SPEED_CHARACTERISTIC_UUID}")
-                Log.e(TAG, "   En servicio: ${CoolerBleConstants.FAN_SERVICE_UUID}")
-                Toast.makeText(this@MainActivity, 
-                    "No se encontraron las caracteristicas BLE necesarias. Verifica el modelo del dispositivo.", 
-                    Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
     private fun disconnectFromCooler() {
         try {
-            if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                return
-            }
-            
-            if (isScanning) {
-                BleConnectionHelper.safeStopScan(bluetoothLeScanner, bleScanCallback, TAG)
-                isScanning = false
-            }
-            
-            // Resetear contadores de reconexión automática
-            status22ReconnectAttempts = 0
-            discoveryTimeoutJob?.cancel()
-            discoveryTimeoutJob = null
-            isDiscoveryInProgress = false
+            CoolerBleManager.stopScan()
+            isScanning = false
             
             // Actualizar estado del perfil antes de desconectar
             currentConnectedProfileId?.let { profileId ->
                 profileRepository.updateConnectionState(profileId, false)
             }
 
-            // Desconectar y dejar que el callback STATE_DISCONNECTED cierre el cliente.
-            // Cerrar antes de que el stack confirme deja el siguiente discovery sin respuesta.
-            val gatt = bluetoothGatt
-            bluetoothGatt = null
-            if (gatt != null) {
-                try {
-                    gatt.disconnect()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error al desconectar: ${e.message}")
-                }
-            }
-            fanCharacteristic = null
-            lightCharacteristic = null
+            // El motor BLE cierra el cliente y notifica con Disconnected(willReconnect=false)
+            CoolerBleManager.disconnect()
             isConnected = false
             isConnecting = false
             currentConnectedProfileId = null
@@ -865,273 +579,10 @@ class MainActivity : ComponentActivity() {
             }
             
             Log.d(TAG, "Desconectado del cooler")
+        } catch (e: SecurityException) {
+            handleSecurityException(e, "desconexión")
         } catch (e: Exception) {
             Log.e(TAG, "Error al desconectar: ${e.message}", e)
-        }
-    }
-
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (isFinishing || isDestroyed) {
-                Log.w(TAG, "Activity destruida, ignorando callback GATT")
-                return
-            }
-            
-            runOnUiThread {
-                isConnecting = false
-                when (newState) {
-                    BluetoothProfile.STATE_CONNECTED -> {
-                        isConnected = true
-                        connectionError = null
-                        discoveryRetryCount = 0
-                        scanTargetMac = null
-                        statusMessage = "Conectado, preparando..."
-                        Log.d(TAG, "Conectado al cooler exitosamente")
-                        Log.d(TAG, "   Device: ${gatt.device.address}")
-                        Log.d(TAG, "   Status: $status")
-                        
-                        if (!BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                            return@runOnUiThread
-                        }
-                        
-                        // Delay mínimo antes de descubrir servicios (la app oficial lo
-                        // hace ~14 ms tras el callback; 800 ms daba ventaja al stack)
-                        monitoringScope.launch {
-                            delay(100L)
-                            if (isFinishing || isDestroyed || !isConnected) return@launch
-                            
-                            runOnUiThread {
-                                isDiscoveryInProgress = true
-                                statusMessage = "Descubriendo servicios..."
-                                try {
-                                    @SuppressLint("MissingPermission")
-                                    if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                                        // Verificar si ya hay servicios cacheados del BLE stack
-                                        val cachedServices = gatt.services
-                                        if (cachedServices != null && cachedServices.isNotEmpty()) {
-                                            Log.d(TAG, "Servicios disponibles desde caché BLE (${cachedServices.size}), saltando discoverServices()")
-                                            isDiscoveryInProgress = false
-                                            processDiscoveredServices(gatt, cachedServices)
-                                            return@runOnUiThread
-                                        }
-                                        Log.d(TAG, "Iniciando descubrimiento de servicios...")
-                                        gatt.discoverServices()
-                                        
-                                        // Timeout watchdog: si discoverServices no responde en 10s, reconectar.
-                                        // Un discovery sano tarda <2 s; 30 s de espera solo alarga el fallo.
-                                        discoveryTimeoutJob?.cancel()
-                                        discoveryTimeoutJob = monitoringScope.launch {
-                                            delay(10000L)
-                                            if (isFinishing || isDestroyed || !isDiscoveryInProgress) return@launch
-                                            runOnUiThread {
-                                                Log.w(TAG, "⚠️ discoverServices() timeout - sin respuesta en 10s")
-                                                statusMessage = "Tiempo de espera agotado, reintentando..."
-                                                isDiscoveryInProgress = false
-                                                isDiscoveryTimedOut = true
-                                                // Disparar desconexión para que el callback maneje el reintento
-                                                try {
-                                                    @SuppressLint("MissingPermission")
-                                                    if (BlePermissionManager.hasBluetoothConnectPermission(this@MainActivity)) {
-                                                        bluetoothGatt?.disconnect()
-                                                    }
-                                                } catch (e: SecurityException) {
-                                                    Log.e(TAG, "SecurityException al desconectar por timeout: ${e.message}")
-                                                    // No habrá callback STATE_DISCONNECTED: manejar aquí y limpiar el flag
-                                                    isDiscoveryTimedOut = false
-                                                    handleDiscoverServicesTimeout()
-                                                }
-                                            }
-                                        }
-                                    }
-                                } catch (e: SecurityException) {
-                                    Log.e(TAG, "SecurityException al descubrir servicios: ${e.message}")
-                                    isDiscoveryInProgress = false
-                                    statusMessage = "Error de permisos al descubrir servicios"
-                                }
-                            }
-                        }
-                    }
-                    BluetoothProfile.STATE_DISCONNECTED -> {
-                        isConnected = false
-                        isConnecting = false
-                        discoveryTimeoutJob?.cancel()
-                        discoveryTimeoutJob = null
-
-                        // Liberar siempre el cliente GATT desconectado: los clientes
-                        // huérfanos dejan bearers ATT colgados y rompen el siguiente
-                        // service discovery.
-                        try {
-                            gatt.close()
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error cerrando GATT desconectado: ${e.message}")
-                        }
-                        if (bluetoothGatt === gatt) bluetoothGatt = null
-                        
-                        // TIMEOUT DE DISCOVERY: Si el timeout watchdog disparó la desconexión,
-                        // manejamos el reintento aquí para evitar que el flujo normal lo sobreescriba
-                        if (isDiscoveryTimedOut) {
-                            isDiscoveryTimedOut = false
-                            handleDiscoverServicesTimeout()
-                            return@runOnUiThread
-                        }
-                        
-                        // STATUS 22 (GATT_CONN_TERMINATE_LOCAL_HOST):
-                        // El stack BLE local terminó la conexión. Ocurre cuando Android
-                        // detecta un estado interno inconsistente (ej: tras refreshGattCache por reflection).
-                        // Estrategia: auto-reconectar con backoff progresivo hasta maxStatus22Reconnects.
-                        if (status == 22) {
-                            connectionError = "Se perdió la conexión. Reintentando..."
-                            // currentConnectedProfileId es null antes del primer discovery,
-                            // pero el perfil pendiente permite reintentar igual que la app oficial
-                            val profileIdForRetry = currentConnectedProfileId ?: pendingConnectionProfileId
-                            if (status22ReconnectAttempts < maxStatus22Reconnects && profileIdForRetry != null) {
-                                status22ReconnectAttempts++
-                                isDiscoveryInProgress = false
-                                val profileId = profileIdForRetry
-                                val attempt = status22ReconnectAttempts
-                                Log.w(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - Reintentando ($attempt/$maxStatus22Reconnects)...")
-                                statusMessage = "Reconectando (intento $attempt)..."
-                                
-                                fanCharacteristic = null
-                                lightCharacteristic = null
-                                
-                                val backoffMs = (2000L * attempt).coerceAtMost(8000L)
-                                monitoringScope.launch {
-                                    delay(backoffMs)
-                                    if (isFinishing || isDestroyed) return@launch
-                                    runOnUiThread {
-                                        val profile = profileId?.let { profileRepository.getProfile(it) }
-                                        if (profile != null) {
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                                connectToProfile(profile, isRetry = true)
-                                            } else {
-                                                Log.w(TAG, "API level insuficiente para reconectar tras status 22")
-                                                statusMessage = "Error: API no compatible para reconexión"
-                                                status22ReconnectAttempts = 0
-                                            }
-                                        } else {
-                                            statusMessage = "Error: perfil no encontrado para reconectar"
-                                            status22ReconnectAttempts = 0
-                                        }
-                                    }
-                                }
-                                return@runOnUiThread
-                            }
-                            status22ReconnectAttempts = 0
-                            Log.e(TAG, "⚠️ GATT_CONN_TERMINATE_LOCAL_HOST (status=22) - Reintentos agotados")
-                            // Fallo conocido del cooler: deja de responder al discovery hasta
-                            // que se reinicia el Bluetooth del teléfono
-                            connectionError = "El cooler no responde al conectar.\n" +
-                                "Desactiva y activa el Bluetooth del teléfono y vuelve a intentarlo."
-                        }
-                        
-                        // Si estamos en medio de un reintento de discovery, no procesar desconexión
-                        if (discoveryRetryCount in 1..<maxDiscoveryRetries) {
-                            Log.w(TAG, "Desconexión durante reintento de discovery (intento $discoveryRetryCount), ignorando...")
-                            return@runOnUiThread
-                        }
-                        
-                        if (status != BluetoothGatt.GATT_SUCCESS && status != 22) {
-                            connectionError = "Se perdió la conexión con el cooler.\nVerificá que esté encendido y cerca."
-                        }
-                        statusMessage = "Desconectado"
-                        Log.d(TAG, "Desconectado del cooler, status: $status")
-                        fanCharacteristic = null
-                        lightCharacteristic = null
-                        discoveryRetryCount = 0
-                        isDiscoveryInProgress = false
-                        
-                        // Actualizar estado del perfil
-                        currentConnectedProfileId?.let { profileId ->
-                            profileRepository.updateConnectionState(profileId, false)
-                        }
-                        currentConnectedProfileId = null
-                        
-                        if (!isServiceRunning(CoolerService::class.java)) {
-                            thermalMonitor.stopMonitoring()
-                        }
-                    }
-                }
-            }
-        }
-
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (isFinishing || isDestroyed) {
-                return
-            }
-            
-            runOnUiThread {
-                // Si el timeout de discovery ya disparó, ignorar este callback tardío
-                // El stack BLE se desbloquea cuando disconnect() cancela la operación colgada,
-                // pero los servicios obtenidos son poco confiables y la reconexión ya está en curso.
-                if (isDiscoveryTimedOut) {
-                    Log.w(TAG, "onServicesDiscovered ignorado - timeout de discovery ya fue manejado")
-                    return@runOnUiThread
-                }
-                
-                // Cancelar timeout watchdog y limpiar flags de discovery
-                discoveryTimeoutJob?.cancel()
-                discoveryTimeoutJob = null
-                isDiscoveryInProgress = false
-                
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "Servicios descubiertos exitosamente")
-                    val services = gatt.services ?: emptyList()
-                    Log.d(TAG, "Total de servicios encontrados: ${services.size}")
-                    processDiscoveredServices(gatt, services)
-                } else {
-                    statusMessage = "Error descubriendo servicios"
-                    Log.e(TAG, "Error en descubrimiento de servicios: $status")
-                }
-            }
-        }
-
-        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (isFinishing || isDestroyed) return
-            
-            runOnUiThread {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    @Suppress("DEPRECATION")
-                    val data = characteristic.value
-                    val value = if (data != null && data.isNotEmpty()) {
-                        data[0].toInt() and 0xFF
-                    } else 0
-                    Log.d(TAG, "Velocidad escrita exitosamente: $value")
-                } else {
-                    Log.e(TAG, "Error escribiendo characteristic: $status")
-                }
-            }
-        }
-
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (isFinishing || isDestroyed) return
-            
-            runOnUiThread {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    @Suppress("DEPRECATION")
-                    val data = characteristic.value
-                    if (data != null && data.isNotEmpty()) {
-                        val rawSpeed = data[0].toInt() and 0xFF
-                        val speedPercent = mapRawToPercent(rawSpeed)
-                        currentCoolerSpeed = speedPercent
-                        Log.d(TAG, "Velocidad leída: $rawSpeed raw → $speedPercent%")
-                    }
-                } else {
-                    Log.e(TAG, "Error leyendo characteristic: $status")
-                }
-            }
-        }
-
-        @Deprecated("Deprecated in API 33")
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            onCharacteristicRead(gatt, characteristic, BluetoothGatt.GATT_SUCCESS)
-        }
-        
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            super.onCharacteristicChanged(gatt, characteristic, value)
-            onCharacteristicRead(gatt, characteristic, BluetoothGatt.GATT_SUCCESS)
         }
     }
 
@@ -1139,7 +590,7 @@ class MainActivity : ComponentActivity() {
      * Maneja la conexión exitosa - crea o actualiza perfil
      */
     private fun handleSuccessfulConnection() {
-        val mac = pendingDeviceMac ?: bluetoothGatt?.device?.address ?: return
+        val mac = pendingDeviceMac ?: CoolerBleManager.connectedDevice?.address ?: return
         val deviceType = pendingNewDeviceType ?: return
         
         // Verificar si ya existe un perfil con esta MAC
@@ -1179,67 +630,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setFanSpeed(speed: Int) {
-        if (!isConnected || bluetoothGatt == null) {
-            Log.w(TAG, "setFanSpeed: No conectado o GATT es null")
+        if (!isConnected) {
+            Log.w(TAG, "setFanSpeed: no conectado")
             return
         }
-
-        fanCharacteristic?.let { characteristic ->
-            try {
-                if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                    return
-                }
-                
-                val rawValue = mapPercentToRaw(speed.coerceIn(0, 100))
-                val value = rawValue.toByte()
-
-                @Suppress("DEPRECATION")
-                characteristic.value = byteArrayOf(value)
-                @Suppress("DEPRECATION")
-                @SuppressLint("MissingPermission")
-                val result = bluetoothGatt?.writeCharacteristic(characteristic)
-                
-                if (result == true) {
-                    Log.d(TAG, "Velocidad establecida: $speed% → $rawValue raw")
-                    currentCoolerSpeed = speed
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error estableciendo velocidad: ${e.message}", e)
-            }
+        if (CoolerBleManager.setFanSpeed(speed)) {
+            currentCoolerSpeed = speed.coerceIn(0, 100)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        // Liberar el launcher de permisos: la Activity ya no puede mostrar dialogos.
+        BlePermissionManager.unregister(this)
         try {
             monitoringScope.cancel()
             
-            if (isScanning) {
-                try {
-                    BleConnectionHelper.safeStopScan(bluetoothLeScanner, bleScanCallback, TAG)
-                    isScanning = false
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error deteniendo escaneo: ${e.message}")
-                }
-            }
-            
+            CoolerBleManager.stopScan()
             thermalMonitor.stopMonitoring()
             
-            // Desconectar todos los perfiles
-            profileRepository.disconnectAllProfiles()
-            
-            BleConnectionHelper.safeCloseGatt(bluetoothGatt, TAG)
-            bluetoothGatt = null
-            fanCharacteristic = null
-            lightCharacteristic = null
+            // Si el servicio no está activo, liberar la conexión para ahorrar batería.
+            // Si está activo (modo automático), el GATT compartido se mantiene.
+            if (!isServiceRunning(CoolerService::class.java)) {
+                CoolerBleManager.disconnect()
+            }
             
             Log.d(TAG, "Recursos BLE liberados correctamente")
         } catch (e: Exception) {
             Log.e(TAG, "Error liberando recursos: ${e.message}", e)
         }
-    }
-    
-    private fun startThermalMonitoring() {
+    }private fun startThermalMonitoring() {
         thermalMonitor.startMonitoring(monitoringScope) { data ->
             thermalData = data
             
@@ -1298,21 +718,8 @@ class MainActivity : ComponentActivity() {
             }
             
             Toast.makeText(this, "Modo Automático Activado", Toast.LENGTH_SHORT).show()
-            
-            // Si hay una conexión activa en MainActivity, desconectar para que el servicio tome el control
-            if (isConnected && bluetoothGatt != null) {
-                Log.d(TAG, "Desconectando GATT de MainActivity para que el servicio tome el control")
-                try {
-                    if (BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                        bluetoothGatt?.disconnect()
-                        bluetoothGatt?.close()
-                    }
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "Error desconectando: ${e.message}")
-                }
-                bluetoothGatt = null
-                isConnected = false
-            }
+            // No se toca el GATT: CoolerBleManager es el propietario único y el
+            // servicio controlará el mismo cooler a través del motor BLE.
             
         } else {
             // Desactivar modo automático
@@ -1325,86 +732,17 @@ class MainActivity : ComponentActivity() {
                 startService(manualIntent)
                 
                 Toast.makeText(this, "Cambiando a Modo Manual...", Toast.LENGTH_SHORT).show()
-                
-                // Esperar a que el servicio se detenga y reconectar desde MainActivity
-                val profile = profileRepository.getProfile(profileId)
-                monitoringScope.launch {
-                    delay(3000) // Dar tiempo para que el servicio cambie a manual y se detenga
-                    if (profile != null && BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && 
-                        bluetoothAdapter.isEnabled && !isConnected) {
-                        runOnUiThread {
-                            Log.d(TAG, "Reconectando en modo manual desde MainActivity")
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                connectToProfile(profile)
-                            } else {
-                                Log.w(TAG, "API level insuficiente para reconectar automáticamente")
-                            }
-                        }
-                    }
-                }
+                Log.d(TAG, "Modo automático desactivado; el GATT compartido sigue activo")
             } else {
                 Toast.makeText(this, "Modo Automático Desactivado", Toast.LENGTH_SHORT).show()
-                
-                // Si no hay servicio activo, simplemente reconectar
-                val profile = profileRepository.getProfile(profileId)
-                monitoringScope.launch {
-                    delay(1000)
-                    if (profile != null && BlePermissionManager.hasCriticalBlePermissions(this@MainActivity) && 
-                        bluetoothAdapter.isEnabled && !isConnected) {
-                        runOnUiThread {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                connectToProfile(profile)
-                            } else {
-                                Log.w(TAG, "API level insuficiente para reconectar automáticamente")
-                            }
-                        }
-                    }
-                }
             }
         }
     }
     
     private fun setRGBLight(effect: LightEffect, red: Int = 0, green: Int = 0, blue: Int = 0) {
-        if (isAutoMode) {
-            val service = CoolerService.getInstance()
-            if (service != null) {
-                service.setRGBLight(effect, red, green, blue)
-            } else {
-                Toast.makeText(this, "Servicio no disponible", Toast.LENGTH_SHORT).show()
-            }
-            return
-        }
-        
-        if (!isConnected || lightCharacteristic == null || bluetoothGatt == null) {
+        // El motor BLE es el propietario del GATT (incluso con modo automático activo)
+        if (!CoolerBleManager.setRGBLight(effect, red, green, blue)) {
             Toast.makeText(this, "No conectado", Toast.LENGTH_SHORT).show()
-            return
-        }
-        
-        try {
-            if (!BlePermissionManager.hasBluetoothConnectPermission(this)) {
-                return
-            }
-            
-            val command = byteArrayOf(
-                effect.code,
-                red.toByte(),
-                green.toByte(),
-                blue.toByte()
-            )
-
-            @Suppress("DEPRECATION")
-            lightCharacteristic?.value = command
-            
-            @Suppress("DEPRECATION")
-            @SuppressLint("MissingPermission")
-            val result = bluetoothGatt?.writeCharacteristic(lightCharacteristic)
-            
-            if (result == true) {
-                Log.d(TAG, "Comando RGB enviado: ${effect.name}, R:$red G:$green B:$blue")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error en setRGBLight: ${e.message}")
-            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
     

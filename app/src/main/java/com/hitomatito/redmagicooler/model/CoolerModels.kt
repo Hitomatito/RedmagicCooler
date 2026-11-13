@@ -38,6 +38,11 @@ data class RGBConfig(
 object CoolerBleConstants {
     // UUID de advertising service - usado para detectar el dispositivo durante el escaneo
     val ADVERTISING_SERVICE_UUID: UUID = UUID.fromString("00004a41-0000-1000-8000-00805f9b34fb")
+
+    // Manufacturer data usado por la app oficial para identificar coolers
+    // Bytes: [mainType (5 = cooler)][subType (generación)]
+    const val MANUFACTURER_COMPANY_ID = 2250 // 0x08CA
+    const val MANUFACTURER_MAIN_TYPE_FAN = 5
     
     // UUID del servicio principal del fan/cooler
     val FAN_SERVICE_UUID: UUID = UUID.fromString("d52082ad-e805-9f97-9d4e-1c682d9c9ce6")
@@ -48,12 +53,13 @@ object CoolerBleConstants {
     val LIGHT_CONTROL_UUID: UUID = UUID.fromString("00001013-0000-1000-8000-00805f9b34fb")
     val AUTO_MODE_CONTROL_UUID: UUID = UUID.fromString("00001018-0000-1000-8000-00805f9b34fb")
     
-    // Conversión de velocidad: 0-100% → 40-200 raw value
+    // Conversión de velocidad: 0-100% → 40-80 raw value
+    // Rango real del hardware del cooler (descubierto del logcat de la app oficial)
     const val MIN_RAW_VALUE = 40
-    const val MAX_RAW_VALUE = 200
+    const val MAX_RAW_VALUE = 80
     
     /**
-     * Convierte porcentaje (0-100) a valor raw del BLE (40-200)
+     * Convierte porcentaje (0-100) a valor raw del BLE (40-80)
      */
     fun percentageToRaw(percentage: Int): Int {
         val clamped = percentage.coerceIn(0, 100)
@@ -61,7 +67,7 @@ object CoolerBleConstants {
     }
     
     /**
-     * Convierte valor raw del BLE (40-200) a porcentaje (0-100)
+     * Convierte valor raw del BLE (40-80) a porcentaje (0-100)
      */
     fun rawToPercentage(raw: Int): Int {
         val clamped = raw.coerceIn(MIN_RAW_VALUE, MAX_RAW_VALUE)
