@@ -127,19 +127,43 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val requestPermissionsLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val denied = permissions.filter { !it.value }.keys
-        
-        if (denied.isEmpty()) {
-            Log.d(TAG, "Todos los permisos concedidos")
-            statusMessage = "Listo para buscar dispositivos"
-        } else {
-            Log.e(TAG, "Permisos DENEGADOS: $denied")
-            statusMessage = "Permisos denegados"
-            Toast.makeText(this, "Se requieren todos los permisos para funcionar", Toast.LENGTH_LONG).show()
+    init {
+        // El launcher de permisos vive centralizado en BlePermissionManager.
+        // Debe registrarse antes de que la Activity llegue a STARTED, por eso va
+        // en un init y no en onCreate. Asi mantiene el orden activity_rq#0.
+        BlePermissionManager.register(this)
+    }
+
+    /**
+     * Reacción unificada a la falta de un permiso BLE: registra el motivo,
+     * informa al usuario y vuelve a pedir los permisos que falten.
+     *
+     * Antes de centralizar esto, cada call site hacia un "return" silencioso y
+     * la app quedaba con la UI de "conectado" sin hacer nada.
+     */
+    private fun handleMissingBlePermission(reason: String) {
+        Log.w(TAG, "Permiso BLE faltante: $reason")
+        statusMessage = reason
+        connectionError = "Se perdieron los permisos de Bluetooth.\n" +
+            "Reactivá los permisos para controlar el cooler."
+
+        // Evitar diálogos duplicados si el usuario sigue interactuando.
+        if (!BlePermissionManager.isRequestInFlight) {
+            BlePermissionManager.requestPermissions(this) { result ->
+                if (!result.granted) {
+                    Log.e(TAG, "Permisos siguen denegados: ${result.denied}")
+                }
+            }
         }
+    }
+
+    /**
+     * Manejo unificado de SecurityException: el permiso BLUETOOTH_CONNECT se
+     * revocó mientras la app estaba en uso.
+     */
+    private fun handleSecurityException(e: SecurityException, operation: String) {
+        Log.e(TAG, "SecurityException en $operation: ${e.message}")
+        handleMissingBlePermission("Permiso de Bluetooth revocado")
     }
 
     private val bluetoothEnableLauncher = registerForActivityResult(
@@ -181,12 +205,15 @@ class MainActivity : ComponentActivity() {
         bluetoothAdapter = bluetoothManager.adapter
         showBluetoothRequired = !bluetoothAdapter.isEnabled
         
-        // Solicitar permisos al inicio
-        if (!BlePermissionManager.hasAllPermissions(this)) {
-            val missing = BlePermissionManager.getMissingPermissions(this)
-            val requestable = missing.filter { it != "android.permission.SCHEDULE_EXACT_ALARM" }
-            if (requestable.isNotEmpty()) {
-                requestPermissionsLauncher.launch(requestable.toTypedArray())
+        // Solicitar permisos al inicio (centralizado en BlePermissionManager)
+        BlePermissionManager.requestPermissions(this) { result ->
+            if (result.granted) {
+                Log.d(TAG, "Todos los permisos concedidos")
+                statusMessage = "Listo para buscar dispositivos"
+            } else {
+                Log.e(TAG, "Permisos DENEGADOS: ${result.denied}")
+                statusMessage = "Permisos denegados"
+                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
             }
         }
         
@@ -428,23 +455,21 @@ class MainActivity : ComponentActivity() {
     private fun startScanForNewDevice(deviceType: CoolerDeviceType) {
         Log.d(TAG, "startScanForNewDevice: ${deviceType.deviceName}")
         
-        // Verificar solo permisos críticos de BLE (sin SCHEDULE_EXACT_ALARM)
-        if (!BlePermissionManager.hasCriticalBlePermissions(this)) {
-            Log.w(TAG, "Faltan permisos BLE criticos")
-            val missing = BlePermissionManager.getMissingPermissions(this)
-            Log.d(TAG, "Permisos faltantes: ${missing.joinToString()}")
-            val requestable = missing.filter { it != "android.permission.SCHEDULE_EXACT_ALARM" }
-            if (requestable.isNotEmpty()) {
-                requestPermissionsLauncher.launch(requestable.toTypedArray())
+        // Pedir los permisos imprescindibles para escanear (centralizado en
+        // BlePermissionManager). Si ya estan concedidos, el callback se invoca
+        // de inmediato y el escaneo sigue sin pedir nada.
+        BlePermissionManager.requestCriticalBlePermissions(this) { result ->
+            if (result.granted) {
+                Log.d(TAG, "Todos los permisos BLE criticos disponibles")
+                pendingNewDeviceType = deviceType
+                pendingConnectionProfileId = null // Es un nuevo dispositivo
+                startScanForDevice(deviceType)
+            } else {
+                Log.e(TAG, "Permisos BLE criticos denegados: ${result.denied}")
+                statusMessage = "Permisos denegados"
+                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
             }
-            return
         }
-        
-        Log.d(TAG, "Todos los permisos BLE criticos disponibles")
-        
-        pendingNewDeviceType = deviceType
-        pendingConnectionProfileId = null // Es un nuevo dispositivo
-        startScanForDevice(deviceType)
     }
 
     /**
@@ -462,8 +487,7 @@ class MainActivity : ComponentActivity() {
         
         try {
             if (!BlePermissionManager.hasBluetoothScanPermission(this)) {
-                Log.e(TAG, "Permiso de escaneo BLE faltante")
-                statusMessage = "Permiso de escaneo requerido"
+                handleMissingBlePermission("Permiso de escaneo Bluetooth requerido")
                 return
             }
             
@@ -492,6 +516,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
             
+        } catch (e: SecurityException) {
+            handleSecurityException(e, "inicio de escaneo")
+            isConnecting = false
+            isScanning = false
         } catch (e: Exception) {
             Log.e(TAG, "Error iniciando escaneo: ${e.message}", e)
             statusMessage = "Error: ${e.message}"
@@ -551,6 +579,8 @@ class MainActivity : ComponentActivity() {
             }
             
             Log.d(TAG, "Desconectado del cooler")
+        } catch (e: SecurityException) {
+            handleSecurityException(e, "desconexión")
         } catch (e: Exception) {
             Log.e(TAG, "Error al desconectar: ${e.message}", e)
         }
@@ -611,6 +641,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Liberar el launcher de permisos: la Activity ya no puede mostrar dialogos.
+        BlePermissionManager.unregister(this)
         try {
             monitoringScope.cancel()
             

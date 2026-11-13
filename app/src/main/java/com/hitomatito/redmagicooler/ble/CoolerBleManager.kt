@@ -215,6 +215,7 @@ object CoolerBleManager {
         }
         if (!BlePermissionManager.hasCriticalBlePermissions(context)) {
             Log.e(TAG, "Permisos BLE críticos faltantes")
+            _events.tryEmit(BleEvent.ConnectionFailed("Permisos BLE críticos faltantes"))
             return
         }
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
