@@ -16,13 +16,13 @@ val keystoreProperties = Properties().apply {
 android {
     namespace = "com.hitomatito.redmagicooler"
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
 
     defaultConfig {
         applicationId = "com.hitomatito.redmagicooler"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 6
         versionName = "1.3.0"
 
@@ -53,6 +53,11 @@ android {
             } else {
                 null
             }
+        }
+    }
+    packaging {
+        jniLibs {
+            keepDebugSymbols += "**/libandroidx.graphics.path.so"
         }
     }
     buildFeatures {
