@@ -1,106 +1,151 @@
 package com.hitomatito.redmagicooler
 
-import java.util.UUID
+import android.bluetooth.le.ScanRecord
+import com.hitomatito.redmagicooler.model.CoolerBleConstants
 
 /**
- * Tipos de dispositivos cooler RedMagic/Nubia soportados
- * Cada tipo tiene su UUID de advertising BLE único y nombre comercial
+ * Tipos de dispositivos cooler RedMagic/Nubia soportados.
+ *
+ * Detección basada en el protocolo real de la app oficial (cn.nubia.externdevice):
+ * el cooler publicita el service UUID `00004a41-0000-1000-8000-00805f9b34fb` y/o
+ * manufacturer data con company ID 2250 (0x08CA) y bytes [mainType=5][subType=gen].
+ * Ver CoolerBleConstants y CoolerBleDetector.
  */
 enum class CoolerDeviceType(
     val deviceName: String,
-    val advertisingUUID: UUID,
+    val manufacturerSubTypes: List<Int>,
     val generation: Int,
     val description: String,
     val imageRes: Int
 ) {
     JACKET_1(
         deviceName = "Enfriador Doble Núcleo",
-        advertisingUUID = UUID.fromString("70e03463-0478-4596-a826-e0002d27618a"),
+        manufacturerSubTypes = listOf(1),
         generation = 1,
         description = "Primera generación de enfriadores RedMagic",
         imageRes = R.drawable.cooler_dual_core
     ),
-    
+
     JACKET_2(
         deviceName = "Enfriador Turbo",
-        advertisingUUID = UUID.fromString("3823dac1-f7be-4a11-a145-83b2b2f35e5e"),
+        manufacturerSubTypes = listOf(2),
         generation = 2,
         description = "Segunda generación con mejoras de rendimiento",
         imageRes = R.drawable.cooler_turbo
     ),
-    
+
     JACKET_3(
         deviceName = "Magcooler",
-        advertisingUUID = UUID.fromString("85e1fd9d-7ca1-4be3-8131-1edde011a47d"),
+        manufacturerSubTypes = listOf(3),
         generation = 3,
         description = "Tercera generación con diseño optimizado",
         imageRes = R.drawable.cooler_magcooler
     ),
-    
+
     JACKET_4(
         deviceName = "Heat Sink 4 Pro",
-        advertisingUUID = UUID.fromString("1e3f2686-e85f-4c25-8dd3-ff6164d46a16"),
+        manufacturerSubTypes = listOf(4),
         generation = 4,
         description = "Cuarta generación profesional",
         imageRes = R.drawable.cooler_heat_sink_4_pro
     ),
-    
+
+    // Jacket5 y Jacket5 Lite publicitan el mismo subType (5): se distinguen por nombre
     JACKET_5(
         deviceName = "Heat Sink 5 Pro",
-        advertisingUUID = UUID.fromString("b739be84-9cca-44ed-8653-4e4c7f16a9a4"),
+        manufacturerSubTypes = listOf(5),
         generation = 5,
         description = "Quinta generación con control RGB avanzado",
         imageRes = R.drawable.cooler_heat_sink_5_pro
     ),
-    
+
     JACKET_5_LITE(
         deviceName = "Heat Sink 5",
-        advertisingUUID = UUID.fromString("a8f345b9-d726-4707-910a-fd637c2b00a7"),
+        manufacturerSubTypes = listOf(5),
         generation = 5,
         description = "Quinta generación, versión estándar",
         imageRes = R.drawable.cooler_heat_sink_5
     ),
-    
+
+    // La app oficial publicita (5,4)|(5,6) para Jacket6
     JACKET_6(
         deviceName = "Heat Sink 6",
-        advertisingUUID = UUID.fromString("e39bc7af-ca69-4977-9fe7-ae3ad560f063"),
+        manufacturerSubTypes = listOf(4, 6),
         generation = 6,
         description = "Sexta generación con eficiencia mejorada",
         imageRes = R.drawable.cooler_heat_sink_6
     ),
-    
+
+    // Jacket6 Pro y Jacket6 Pro+ publicitan (5,5)|(5,6): se distinguen por nombre
     JACKET_6_PRO(
         deviceName = "Heat Sink 6 Pro",
-        advertisingUUID = UUID.fromString("9c24a801-7666-40c1-9589-26a89425a0b0"),
+        manufacturerSubTypes = listOf(5, 6),
         generation = 6,
         description = "Versión profesional de sexta generación",
         imageRes = R.drawable.cooler_heat_sink_6_pro
+    ),
+
+    JACKET_6_PRO_PLUS(
+        deviceName = "Heat Sink 6 Pro+",
+        manufacturerSubTypes = listOf(5, 6),
+        generation = 6,
+        description = "Versión profesional plus de sexta generación",
+        imageRes = R.drawable.cooler_heat_sink_6_pro_plus
     );
 
     companion object {
         /**
-         * Encuentra el tipo de dispositivo por UUID de advertising
+         * Identifica el tipo de cooler a partir del scan record BLE.
+         * Es el método de detección principal (protocolo de la app oficial):
+         * requiere el service de advertising 00004a41 y/o manufacturer 2250 con mainType 5.
+         * @return tipo detectado o null si el dispositivo no parece un cooler RedMagic
          */
-        fun fromAdvertisingUUID(uuid: UUID): CoolerDeviceType? {
-            return CoolerDeviceType.entries.find { it.advertisingUUID == uuid }
+        fun fromScanRecord(scanRecord: ScanRecord?): CoolerDeviceType? {
+            if (scanRecord == null) return null
+            val hasAdService = scanRecord.serviceUuids?.any { parcel ->
+                parcel.uuid == CoolerBleConstants.ADVERTISING_SERVICE_UUID
+            } == true
+            val manufacturer = scanRecord.getManufacturerSpecificData(CoolerBleConstants.MANUFACTURER_COMPANY_ID)
+            if (!hasAdService && manufacturer == null) return null
+
+            val subType = manufacturer
+                ?.takeIf { it.size >= 2 && (it[0].toInt() and 0xFF) == CoolerBleConstants.MANUFACTURER_MAIN_TYPE_FAN }
+                ?.let { it[1].toInt() and 0xFF }
+
+            val byManufacturer = subType?.let { s ->
+                entries.filter { s in it.manufacturerSubTypes }
+            } ?: emptyList()
+
+            val name = scanRecord.deviceName
+            val byName = name?.let { n ->
+                entries.filter { it.matchesBleName(n) }
+            } ?: emptyList()
+
+            val byBoth = byManufacturer.intersect(byName.toSet())
+            return when {
+                byBoth.size == 1 -> byBoth.single()
+                // Desambiguación por modelo cuando manufacturer y nombre no deciden:
+                // subType 4 → Jacket4 (más probable sin evidencia de 6ª gen)
+                // subType 5 sin evidencia de "Pro" → Jacket5 Lite (más probable en G5)
+                // subType 6 → primera gen 6 (Jacket6)
+                byBoth.size > 1 -> byBoth.sortedBy { it.generation }.first()
+                byManufacturer.size == 1 -> byManufacturer.single()
+                byManufacturer.size > 1 -> byManufacturer.sortedBy { it.generation }.first()
+                byName.size == 1 -> byName.single()
+                byName.size > 1 -> byName.sortedBy { it.generation }.first()
+                else -> null
+            }
         }
-        
+
         /**
          * Encuentra el tipo de dispositivo por nombre
          */
         fun fromDeviceName(name: String): CoolerDeviceType? {
             return CoolerDeviceType.entries.find {
-                it.deviceName.equals(name, ignoreCase = true) 
+                it.deviceName.equals(name, ignoreCase = true)
             }
         }
-        
-        /**
-         * Obtiene todos los UUIDs para usar en filtros de escaneo
-         */
-        fun getAllAdvertisingUUIDs(): List<UUID> {
-            return CoolerDeviceType.entries.map { it.advertisingUUID }
-        }
-        
+
         /**
          * Obtiene todos los nombres de dispositivos para mostrar en UI
          */
@@ -108,51 +153,49 @@ enum class CoolerDeviceType(
             return CoolerDeviceType.entries.map { it.deviceName }
         }
     }
-    
+
     /**
-     * Verifica si este tipo de dispositivo es compatible con el nombre BLE detectado
-     * Validación estricta para evitar falsos positivos
+     * Verifica si este tipo de dispositivo es compatible con el nombre BLE detectado.
+     * Sirve para desambiguar cuando varios modelos comparten subType (p.ej. Jacket5/Lite).
      */
     fun matchesBleName(bleName: String?): Boolean {
         if (bleName == null) return false
-        
-        // CRÍTICO: Solo aceptar nombres que contengan marcadores de RedMagic/Nubia
+
         val isRedMagicDevice = bleName.contains("Magcooler", ignoreCase = true) ||
                                bleName.contains("MagCooler", ignoreCase = true) ||
                                bleName.contains("RM ", ignoreCase = true) ||
                                bleName.contains("RedMagic", ignoreCase = true) ||
                                bleName.contains("Red Magic", ignoreCase = true) ||
                                bleName.contains("Nubia", ignoreCase = true)
-        
+
         if (!isRedMagicDevice) {
-            return false // No es un dispositivo RedMagic, rechazar inmediatamente
+            return false
         }
-        
-        // Ahora verificar patrones específicos por generación
+
+        val n = bleName.lowercase()
+        fun hasAny(vararg parts: String) = parts.any { n.contains(it.lowercase()) }
+
         return when (this) {
-            JACKET_1 -> bleName.contains("Jacket", ignoreCase = true) ||
-                        bleName.contains("Dual", ignoreCase = true)
-            JACKET_2 -> bleName.contains("Turbo", ignoreCase = true)
-            JACKET_3 -> bleName.contains("Magcooler 3", ignoreCase = true) ||
-                        bleName.contains("MagCooler3", ignoreCase = true)
-            JACKET_4 -> bleName.contains("4", ignoreCase = true)
-            JACKET_5 -> bleName.contains("5pro", ignoreCase = true) ||
-                        (bleName.contains("5", ignoreCase = true) && bleName.contains("Pro", ignoreCase = true))
-            JACKET_5_LITE -> bleName.contains("5 Lite", ignoreCase = true) ||
-                             bleName.contains("5Lite", ignoreCase = true)
-            JACKET_6 -> bleName.contains("6", ignoreCase = true) && !bleName.contains("Pro", ignoreCase = true)
-            JACKET_6_PRO -> bleName.contains("6", ignoreCase = true) && bleName.contains("Pro", ignoreCase = true)
+            JACKET_1 -> hasAny("dual", "doble", "jacket 1", "jacket1")
+            JACKET_2 -> hasAny("turbo", "jacket 2", "jacket2")
+            JACKET_3 -> hasAny("magcooler 3", "magcooler3", "jacket 3", "jacket3")
+            JACKET_4 -> n.contains("4")
+            JACKET_5 -> n.contains("5") && hasAny("pro") && !hasAny("plus", "pro+", "pro plus")
+            JACKET_5_LITE -> n.contains("5") && !hasAny("pro")
+            JACKET_6 -> n.contains("6") && !hasAny("pro")
+            JACKET_6_PRO -> n.contains("6") && hasAny("pro") && !hasAny("plus", "pro+", "pro plus")
+            JACKET_6_PRO_PLUS -> n.contains("6") && hasAny("plus", "pro+", "pro plus")
         }
     }
-    
+
     /**
      * Icono sugerido para este tipo de dispositivo (para UI futura)
      */
     fun getSuggestedIcon(): String {
         return when (generation) {
-            1, 2 -> "🌀" // Generaciones antiguas
-            3, 4 -> "❄️" // Generaciones intermedias
-            5, 6 -> "🔷" // Generaciones modernas
+            1, 2 -> "🌀"
+            3, 4 -> "❄️"
+            5, 6 -> "🔷"
             else -> "Dispositivo"
         }
     }
