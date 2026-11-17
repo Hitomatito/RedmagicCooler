@@ -592,7 +592,7 @@ class CoolerService : Service() {
                                 ThermalMonitor.TempLevel.SAFE -> "Normal"
                                 ThermalMonitor.TempLevel.WARM -> "Tibio" 
                                 ThermalMonitor.TempLevel.HOT -> "Caliente"
-                                ThermalMonitor.TempLevel.CRITICAL -> "Crítico"
+                                ThermalMonitor.TempLevel.CRITICAL -> "Critico"
                             }
                             updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
                             
