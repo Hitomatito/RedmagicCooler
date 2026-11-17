@@ -38,4 +38,9 @@ object ThermalMonitorManager {
     /** Devuelve la última lectura o una instantánea nueva si el monitor está inicializado. */
     fun currentFreshData(): ThermalMonitor.ThermalData =
         monitor?.getCurrentThermalData() ?: ThermalMonitor.ThermalData()
+
+    /** Siembra la rampa compartida con la velocidad leída del dispositivo (calibración inicial). */
+    fun seedRamp(speedPercent: Int) {
+        monitor?.seedRamp(speedPercent)
+    }
 }
