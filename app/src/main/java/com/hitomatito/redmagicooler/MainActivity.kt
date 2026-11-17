@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
     // La conexión BLE la posee CoolerBleManager (propietario único).
     // Esta actividad actúa como cliente: observa estado y emite comandos.
     private var isScanning by mutableStateOf(false)
+    @Volatile private var manualScanInFlight = false
 
     // Estados observables para la UI
     private var isConnected by mutableStateOf(false)
@@ -396,6 +397,7 @@ class MainActivity : ComponentActivity() {
                         pendingDeviceName = event.device.bleName
                         pendingDeviceRssi = event.device.rssi
                         pendingNewDeviceType = event.device.deviceType
+                        manualScanInFlight = false
                         isConnecting = false
                         statusMessage = "Conectado"
                         handleSuccessfulConnection()
@@ -408,6 +410,7 @@ class MainActivity : ComponentActivity() {
                             profileRepository.updateConnectionState(pid, false)
                         }
                         currentConnectedProfileId = null
+                        manualScanInFlight = false
                         isConnecting = false
                     }
                     is CoolerBleManager.BleEvent.FanSpeedChanged -> Unit // gestionado por el flow de estado
@@ -417,6 +420,7 @@ class MainActivity : ComponentActivity() {
                         Log.w(TAG, "Error de conexión: ${event.reason}")
                         connectionError = event.reason
                         statusMessage = "Error: ${event.reason}"
+                        manualScanInFlight = false
                         isConnecting = false
                         isScanning = false
                     }
@@ -484,7 +488,7 @@ class MainActivity : ComponentActivity() {
     private fun startScanForDevice(deviceType: CoolerDeviceType, targetMac: String? = null) {
         Log.d(TAG, "startScanForDevice: ${deviceType.deviceName}")
         
-        if (isScanning) {
+        if (manualScanInFlight) {
             Log.w(TAG, "Ya hay un escaneo en curso")
             return
         }
@@ -495,13 +499,21 @@ class MainActivity : ComponentActivity() {
                 return
             }
             
+            // El motor BLE cierra la conexión anterior si la hay.
+            // Si ya hay un escaneo (p. ej. reconexión en segundo plano), no armamos
+            // el timeout manual para no cancelar ese escaneo ajeno.
+            if (!CoolerBleManager.startScan(lowLatency = true, targetMac = targetMac, targetType = deviceType)) {
+                manualScanInFlight = false
+                isConnecting = false
+                statusMessage = "No se pudo iniciar el escaneo"
+                return
+            }
+
+            manualScanInFlight = true
             isConnecting = true
             statusMessage = "Buscando ${deviceType.deviceName}..."
             Log.d(TAG, "Estado actualizado: isConnecting=true, statusMessage=$statusMessage")
-            
-            // El motor BLE cierra la conexión anterior si la hay
-            CoolerBleManager.startScan(lowLatency = true, targetMac = targetMac, targetType = deviceType)
-            
+
             Log.d(TAG, "Escaneo iniciado para: ${deviceType.deviceName}")
             
             // Timeout de 20 segundos
@@ -509,7 +521,7 @@ class MainActivity : ComponentActivity() {
                 delay(20000.milliseconds)
                 if (isFinishing || isDestroyed) return@launch
                 
-                if (isScanning) {
+                if (manualScanInFlight) {
                     runOnUiThread {
                         cancelScan()
                         statusMessage = "No se encontró el dispositivo"
@@ -522,11 +534,13 @@ class MainActivity : ComponentActivity() {
             
         } catch (e: SecurityException) {
             handleSecurityException(e, "inicio de escaneo")
+            manualScanInFlight = false
             isConnecting = false
             isScanning = false
         } catch (e: Exception) {
             Log.e(TAG, "Error iniciando escaneo: ${e.message}", e)
             statusMessage = "Error: ${e.message}"
+            manualScanInFlight = false
             isConnecting = false
             isScanning = false
         }
@@ -536,6 +550,7 @@ class MainActivity : ComponentActivity() {
      * Cancela el escaneo actual
      */
     private fun cancelScan() {
+        manualScanInFlight = false
         CoolerBleManager.stopScan()
         isScanning = false
         isConnecting = false

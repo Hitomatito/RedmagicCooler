@@ -173,6 +173,9 @@ object CoolerBleManager {
     private var reconnectAttempts = 0
     @Volatile
     private var reconnectBackoffMs = 2000L
+    @Volatile
+    private var scanIsReconnectAttempt = false
+    private var reconnectJob: Job? = null
 
     val connectedDevice: CoolerDevice? get() = connectedCoolerDevice
     @Volatile private var discoveryTimedOutFlag = false
@@ -195,31 +198,32 @@ object CoolerBleManager {
         lowLatency: Boolean = true,
         targetMac: String? = null,
         targetType: CoolerDeviceType? = null,
-        resetAttempts: Boolean = true
-    ) {
+        resetAttempts: Boolean = true,
+        isReconnectAttempt: Boolean = false
+    ): Boolean {
         val context = appContext
             ?: run {
                 Log.e(TAG, "init() no llamado: falta contexto")
-                return
+                return false
             }
         if (isScanning) {
             Log.w(TAG, "Escaneo ya en curso")
-            return
+            return false
         }
         if (!BlePermissionManager.hasCriticalBlePermissions(context)) {
             Log.e(TAG, "Permisos BLE críticos faltantes")
             _events.tryEmit(BleEvent.ConnectionFailed("Permisos BLE críticos faltantes"))
-            return
+            return false
         }
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         val adapter = bluetoothManager?.adapter
         if (adapter == null || !adapter.isEnabled) {
             Log.e(TAG, "Bluetooth desactivado o no disponible")
-            return
+            return false
         }
         val scanner = adapter.bluetoothLeScanner ?: run {
             Log.e(TAG, "BluetoothLeScanner no disponible")
-            return
+            return false
         }
 
         bluetoothLeScanner = scanner
@@ -229,6 +233,7 @@ object CoolerBleManager {
         }
         scanTargetMac = targetMac
         scanTargetType = targetType
+        scanIsReconnectAttempt = isReconnectAttempt
 
         val settings = ScanSettings.Builder()
             .setScanMode(if (lowLatency) ScanSettings.SCAN_MODE_LOW_LATENCY else ScanSettings.SCAN_MODE_LOW_POWER)
@@ -244,7 +249,7 @@ object CoolerBleManager {
             Log.e(TAG, "Error iniciando escaneo: ${e.message}", e)
             isScanning = false
             _state.value = ConnectionState.DISCONNECTED
-            return
+            return false
         }
 
         scanTimeoutJob?.cancel()
@@ -253,14 +258,15 @@ object CoolerBleManager {
             if (isScanning && !isConnected) {
                 Log.d(TAG, "Timeout de escaneo ($SCAN_TIMEOUT_MS ms), deteniendo")
                 stopScan()
-                // Si este escaneo era un intento de reconexión (target concreto),
-                // seguir con los siguientes en vez de rendirse aquí
-                if (scanTargetMac != null && scanTargetType != null) {
+                // Encadena el siguiente intento tanto para escaneos con MAC como
+                // genéricos; un escaneo manual del usuario no debe reconectar solo.
+                if (scanIsReconnectAttempt || (scanTargetMac != null && scanTargetType != null)) {
                     // scheduleReconnect decide por contador (o emite ConnectionFailed al agotarse)
                     scheduleReconnect()
                 }
             }
         }
+        return true
     }
 
     fun stopScan() {
@@ -325,6 +331,11 @@ object CoolerBleManager {
             deviceType = deviceType,
             rssi = rssi
         )
+        // Recordar el destino también al conectar por MAC: sin esto, una desconexión
+        // posterior solo haría un escaneo genérico y se rendiría tras él.
+        scanTargetMac = device.address
+        scanTargetType = deviceType
+        scanIsReconnectAttempt = false
         discoveryRetryCount = 0
         discoveryTimedOutFlag = false
 
@@ -342,8 +353,12 @@ object CoolerBleManager {
 
     /** Desconexión intencional. Cancela reintentos. */
     fun disconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
         reconnectAttempts = MAX_RECONNECT_ATTEMPTS // bloquea reintentos
+        scanIsReconnectAttempt = false
         closeGattInternal()
+        stopScan()
         _state.value = ConnectionState.DISCONNECTED
     }
 
@@ -377,7 +392,12 @@ object CoolerBleManager {
 
     /** Reconexión solicitada externamente (p.ej. al restaurar estado tras recrear el servicio). */
     fun requestReconnect(macAddress: String, deviceType: CoolerDeviceType) {
+        if (isHealthy() && connectedCoolerDevice?.address?.equals(macAddress, ignoreCase = true) == true) {
+            Log.d(TAG, "Reconexión omitida: ya conectado a $macAddress")
+            return
+        }
         Log.d(TAG, "Reconexión solicitada para $macAddress (${deviceType.deviceName})")
+        reconnectJob?.cancel()
         reconnectAttempts = 0
         reconnectBackoffMs = 2000L
         startScan(lowLatency = false, targetMac = macAddress, targetType = deviceType)
@@ -517,6 +537,8 @@ object CoolerBleManager {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 android.bluetooth.BluetoothProfile.STATE_CONNECTED -> {
+                    reconnectJob?.cancel()
+                    reconnectJob = null
                     isConnected = true
                     reconnectAttempts = 0
                     reconnectBackoffMs = 2000L
@@ -817,6 +839,7 @@ object CoolerBleManager {
     // ------------------------------------------------ reconexión
 
     private fun scheduleReconnect() {
+        reconnectJob?.cancel()
         val targetMac = scanTargetMac
         val targetType = scanTargetType
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -828,18 +851,26 @@ object CoolerBleManager {
             reconnectAttempts++
             val backoff = reconnectBackoffMs
             Log.d(TAG, "Programando reconexión $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS en ${backoff}ms")
-            scope.launch {
+            reconnectJob = scope.launch {
                 delay(backoff)
-                startScan(lowLatency = false, targetMac = targetMac, targetType = targetType, resetAttempts = false)
+                startScan(
+                    lowLatency = false,
+                    targetMac = targetMac,
+                    targetType = targetType,
+                    resetAttempts = false,
+                    isReconnectAttempt = true
+                )
             }
             reconnectBackoffMs = (reconnectBackoffMs * 2).coerceAtMost(30000L)
             return
         }
-        // Sin destino conocido: permitir un único escaneo genérico de reintento
+        // Sin destino conocido: encadenar escaneos genéricos hasta agotar los intentos
         reconnectAttempts++
-        scope.launch {
-            delay(reconnectBackoffMs)
-            startScan(lowLatency = false, resetAttempts = false)
+        val backoff = reconnectBackoffMs
+        Log.d(TAG, "Programando reconexión genérica $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS en ${backoff}ms")
+        reconnectJob = scope.launch {
+            delay(backoff)
+            startScan(lowLatency = false, resetAttempts = false, isReconnectAttempt = true)
         }
         reconnectBackoffMs = (reconnectBackoffMs * 2).coerceAtMost(30000L)
     }
