@@ -20,7 +20,7 @@
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
   </a>
   <img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 7.0+">
-  <img src="https://img.shields.io/badge/Kotlin-2.3-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin 2.3">
+  <img src="https://img.shields.io/badge/Kotlin-2.4-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin 2.4">
 </p>
 
 RedmagicCooler is a community-built Android client for RedMagic / Nubia magnetic coolers. It talks directly to the cooler over Bluetooth LE, so you can control the fan, enable automatic thermal regulation, and change the RGB lighting without the official app.
@@ -108,12 +108,12 @@ The release APK is written to `app/build/outputs/apk/release/`.
 3. Tap the add button, choose your cooler model, and scan.
 4. Select the cooler and connect.
 5. Use the fan slider or the 0/50/100 presets, enable automatic mode for thermal control, or open the RGB screen to choose an effect and color.
-6. When automatic mode is active, a foreground service keeps thermal monitoring alive in the background. Use the notification actions to switch between automatic and manual mode or to reconnect.
+6. When automatic mode is active, a foreground service keeps thermal monitoring alive in the background. Use the notification actions to switch between automatic and manual mode or to stop the service.
 7. Add more profiles for other coolers. The app stores each profile separately and connects to one cooler at a time.
 
 ### Automatic mode
 
-Automatic mode reads the phone's battery and system thermal sensors, maps the highest available temperature to a recommended fan speed, and ramps the cooler up or down with minimum step and dwell-time guards to avoid rapid oscillation. Temperatures at or above the critical threshold jump directly to maximum speed. Manual fan control is disabled while automatic mode is active.
+Automatic mode reads the phone's battery, skin and other system thermal sensors. The control signal prefers the skin sensor, falling back to battery; sustained hardware-peak risk (>=55 °C for 45 s) switches the progressive ramp to the emergency increment (+20% per step) instead of the normal +10%. The cooler speed is ramped up or down with minimum step and dwell-time guards to avoid rapid oscillation, and there is no direct jump to maximum speed. Manual fan control is disabled while automatic mode is active.
 
 ## Permissions
 
@@ -160,7 +160,7 @@ Fan speed is sent as a raw value between `40` and `80`, mapped from the UI's `0�
 | `MainActivity` | Compose host and navigation; observes the BLE engine and issues commands. |
 | `CoolerService` | Foreground service for automatic mode: notifications, thermal loop, and BLE commands via the shared engine. |
 | `ThermalMonitor` | Battery and system thermal sensors, temperature levels, and recommended fan speed. |
-| `ProfileRepository` | Local profile storage using SharedPreferences and JSON. Profiles are managed independently; no separate active-profile id is persisted. |
+| `ProfileRepository` | Local profile storage using SharedPreferences and JSON. Profiles are managed independently. The foreground service additionally persists the active profile id/type/MAC/name in its own `cooler_service_prefs` so the same profile can be reloaded when the service restarts while auto mode stays enabled in the repository — it never resurrects automatic mode on its own (`START_NOT_STICKY`). |
 | `ui/` | Home, Add device, Profile, and RGB screens with a Material 3 theme. |
 | `model/` | BLE constants, profiles, and RGB configuration. |
 | `ble/` | Single GATT owner and op queue. |
@@ -193,7 +193,7 @@ Pull requests are welcome. For BLE issues, include the cooler model, phone model
 
 Some coolers stop answering GATT service discovery after a disconnect. The BLE link is established, but the cooler does not respond to ATT requests and Android terminates the connection with `status 22` after roughly 30 seconds. The official Nubia app shows the same behavior, so this is a cooler firmware or phone Bluetooth-stack limitation rather than an app bug.
 
-**Workaround:** toggle Bluetooth off and on, then reconnect. The app retries up to three times before showing the error.
+**Workaround:** toggle Bluetooth off and on, then reconnect. The app retries up to five times before showing the error.
 
 ### The fan slider is disabled
 

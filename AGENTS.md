@@ -9,7 +9,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
   export JAVA_HOME="$HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2"   # Temurin 21.0.7
   ```
 - Android SDK: `~/Android/Sdk` (wired in `local.properties`, platform `android-37.0`, build-tools `36.0.0`).
-- Toolchain: Gradle 9.9.1 (wrapper), AGP 9.5.1, Kotlin 2.4.21 (`gradle/libs.versions.toml`). The tracked `gradle/gradle-daemon-jvm.properties` pins the daemon JVM via the foojay resolver plugin in `settings.gradle.kts`; the exported `JAVA_HOME` above is still needed for direct `./gradlew` launches.
+- Toolchain: Gradle 9.9.1 (wrapper), AGP 9.5.1, Kotlin 2.4.21 (`gradle/libs.versions.toml`). The tracked `gradle/gradle-daemon-jvm.properties` pins the daemon JVM to **JetBrains Runtime 25** (auto-provisioned via the foojay resolver plugin in `settings.gradle.kts`, cached under `~/.gradle/jdks/`); the exported `JAVA_HOME` above is still needed for direct `./gradlew` launches. CI instead uses Temurin 21 (`.github/workflows/ci.yml`).
 - `.idea/` is partially tracked (code styles, run configurations, inspection profiles are committed; `caches/`, `workspace.xml` etc. are gitignored). Don't commit IDE noise blindly.
 - Android Studio may rewrite `gradle/libs.versions.toml` and `gradle/wrapper/gradle-wrapper.properties` on sync (version upgrades). If those are dirty and you didn’t touch them, don’t commit them blindly. The current wrapper bump keeps `retries=0` and `retryBackOffMs=500`; change those only when intentionally updating Gradle.
 
@@ -19,7 +19,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
 ./gradlew testDebugUnitTest   # unit tests (matches CI)
 ./gradlew assembleDebug       # -> app/build/outputs/apk/debug/app-debug.apk
 ./gradlew assembleRelease     # -> app/build/outputs/apk/release/
-./gradlew lintDebug           # AGP lint; currently clean, not run by CI
+./gradlew lintDebug           # AGP lint; verified: 0 errors, 3 warnings (UseCompoundDrawables + HardcodedText x2), all in notification_cooler_collapsed.xml; not run by CI
 # Single test: ./gradlew :app:testDebugUnitTest --tests "com.hitomatito.redmagicooler.ExampleUnitTest"
 ```
 
@@ -40,24 +40,26 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 | Auto-mode foreground service (client of BLE engine) | `CoolerService.kt` |
 | Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt`, `ThermalMonitorManager.kt` (singleton; `initialize(context)` once, UI + service share it) |
 | Profile persistence (SharedPreferences + JSON, `StateFlow`) | `data/ProfileRepository.kt` (singleton) |
+| Pure thermal curve/ramp/interval logic (unit-tested) | `ThermalPolicy.kt` (consumed by `ThermalMonitor.kt`, `CoolerService.kt`, `ThermalPolicyTest.kt`) |
 | Scanner/connection helpers | `utils/BleConnectionHelper.kt` |
 | Supported cooler models (manufacturer subtype + drawable) | `CoolerDeviceType.kt` (**package root, not `model/`**) |
 | BLE UUIDs, `RGBConfig`, `LightEffect` | `model/CoolerModels.kt` (`CoolerBleConstants` lives here) |
 | Profile model | `model/CoolerProfile.kt` |
 | Device DTO/list | `CoolerDevice.kt` |
 
-**`CoolerBleManager` is the single BLE GATT owner.** `MainActivity` and `CoolerService` are clients: they observe `CoolerBleManager.state`/`events` and issue commands (`startScan`, `enqueueOp` via public command functions, `requestReconnect`, `applyPendingRGB`). Do not create a second `BluetoothGatt` in Activity/Service; extend the manager’s op queue instead.
+**`CoolerBleManager` is the single BLE GATT owner.** `MainActivity` and `CoolerService` are clients: they observe `CoolerBleManager.state`/`events` and issue commands (`startScan`, `enqueueOp` via public command functions, `requestReconnect`, `disconnect`, `setFanSpeed`, `setRGBLight`, `setAutoMode`). Do not create a second `BluetoothGatt` in Activity/Service; extend the manager’s op queue instead.
 
-Automatic mode state is coordinated through `CoolerService` intents (`ACTION_START_AUTO`, `ACTION_STOP_AUTO`, `ACTION_SWITCH_TO_MANUAL`) and the selected profile in `ProfileRepository`. No separate persisted active-profile id is kept. Manual-mode UI stays available while disconnected, but is disabled when the profile’s auto mode is on.
+Automatic mode state is coordinated through `CoolerService` intents (`ACTION_START_AUTO`, `ACTION_STOP_AUTO`, `ACTION_SWITCH_TO_MANUAL`) and the selected profile in `ProfileRepository`. The repository is the single source of truth for `isAutoMode`: the service builds/reloads `activeProfile` from it, and it is the only place that persists auto mode (plus the service's own `cooler_service_prefs` `ACTIVE_PROFILE_*` for cold restore, which is validated against the repository on load). `ACTION_STOP_AUTO` is authoritative: it clears the repository flag, prefs and `activeProfile` before `stopSelf()`, and `onDestroy` never touches the repository — an externally killed service therefore no longer "resurrects" or silently clears flags. `START_NOT_STICKY`: no implicit recreation; app-side reconciliation (`verifyAndCleanServiceState()`) clears stale auto flags on next launch if the service died. Manual-mode UI stays available while disconnected, but is disabled when the profile’s auto mode is on.
 
 ## BLE protocol facts (reverse-engineered, no public spec)
 
 - Fan service `d52082ad-e805-9f97-9d4e-1c682d9c9ce6`; characteristics `0x1012` (fan speed), `0x1013` (RGB), `0x1015` (temperature notify), `0x1018` (auto mode). Advertising service `00004a41-...`.
 - Detection is manufacturer-data first: company ID `2250` (`0x08CA`), byte `[0] = 5` (fan), `[1] = generation subtype`, optionally combined with strict BLE-name matching. Keep `CoolerDeviceType.fromScanRecord` as the source of truth when adding models.
 - RGB command = 4 bytes: `[effectCode, r, g, b]`. Effect codes: `0x01` colorful, `0x02` full-color breath, `0x03` single-color breath, `0x04` always bright.
-- `status == 22` (`GATT_CONN_TERMINATE_LOCAL_HOST`) is a known cooler firmware limitation, not an app bug. The engine auto-reconnects with backoff and `discoverServices()` has a watchdog that forces a retry/reconnect.
+- `status == 22` (`GATT_CONN_TERMINATE_LOCAL_HOST`) is a known cooler firmware limitation, not an app bug. The engine auto-reconnects with exponential backoff (`MAX_RECONNECT_ATTEMPTS = 5`) and `discoverServices()` has a timeout watchdog plus `maxDiscoveryRetries` retries. README documents the same values.
 - GATT lifecycle rules that matter: always `disconnect()` **then** `close()`; closing before the stack confirms the disconnect breaks the next service discovery. Use `BleConnectionHelper.safeCloseGatt` / `safeStopScan`.
 - `CoolerBleManager` queues GATT operations one at a time; Android drops bursted writes. Preserve the op queue when adding characteristics.
+- `CoolerBleManager.disconnect()` stops the scanner (`stopScan()`) in addition to disconnecting/closing the GATT. Desconexiones intencionales no emiten un `ConnectionFailed` falso ni reconectan (`intentionalDisconnect`). Los callbacks de un GATT obsoleto se ignoran por identidad de instancia (write/read/descriptor, `onConnectionStateChange`, `onServicesDiscovered`, `onCharacteristicChanged`), y el timeout de op solo fuerza avance si el GATT sigue siendo el mismo.
 
 ### Fan-speed range
 
@@ -69,12 +71,14 @@ The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` →
 - Code comments, KDoc and log messages are in **Spanish**; the README is in **English**. Match the file you edit.
 - Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.3.0`, `docs: ...`. Recent commits mix in English. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main` (one `feat/<english-slug>` branch exists).
 - `settings.gradle.kts` has `rootProject.name = "RedmagiCooler"` (missing "c") while the application id, package and app label are `RedmagicCooler` / `redmagicooler`. Don’t rename casually — it changes the Gradle module name.
+- Release version bumps edit both `versionCode` and `versionName` in `app/build.gradle.kts` (currently 7 / 1.4.0); commit subject convention is `chore: subir versión a X.Y.Z`. Release signing enables v2/v3/v4 schemes conditionally on `keystore.properties`.
 - `CoolerService.DEBUG = true` gates verbose logging; the comment says flip it to `false` for production. It's a `private const val`, so flip it by editing the file.
 - Compose lint rule: the first optional parameter on a `@Composable` should be `modifier: Modifier = Modifier`.
 
 ## Testing reality
 
-- The only tests are the AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`). **There is no real test coverage** and no mocking library is wired up (`testImplementation` is plain JUnit4 only — no MockK, no Robolectric, no Turbine). Adding them means adding dependencies to `gradle/libs.versions.toml`.
+- Unit tests: AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`) plus `ThermalPolicyTest` and `CoolerBleConstantsTest` (pure JVM, plain JUnit4 — no MockK, no Robolectric, no Turbine). Add dependencies to `gradle/libs.versions.toml` if you need more.
+- `./gradlew testDebugUnitTest` runs them in CI. `ThermalPolicy` (`ThermalPolicy.kt`) holds the pure thermal curve/ramp/interval logic — put new thermal logic there, not in `ThermalMonitor`, so it stays testable. `getCurrentThermalData()` is read-only (no ramp side effects); `startMonitoring` advances the ramp.
 - Code that touches Android framework classes (`Context`, `BluetoothGatt`, `SensorManager`) is currently untestable as written; extracting pure logic is usually the easiest path to coverage.
 
 ## Do not
