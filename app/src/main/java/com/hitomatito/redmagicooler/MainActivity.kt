@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
     // Estado térmico compartido por esta UI y CoolerService
     private val monitoringScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var thermalDataCollectionJob: Job? = null
-    private var isAutoMode by mutableStateOf(false)
+    // La UI y el repositorio son la fuente de verdad del modo automático.
     private var thermalData by mutableStateOf(ThermalMonitor.ThermalData())
     
     // Control de Bluetooth
@@ -308,11 +308,25 @@ class MainActivity : ComponentActivity() {
                                     profileRepository.updateFanSpeed(profileId, speed)
                                 },
                                 onToggleAutoMode = { toggleAutoMode(profileId) },
+                                isConnecting = isConnecting,
                                 onConnect = { connectToProfile(currentProfile) },
                                 onDisconnect = { disconnectFromCooler() },
-                                onDeleteProfile = { 
+                                onDeleteProfile = {
                                     if (currentConnectedProfileId == profileId) {
                                         disconnectFromCooler()
+                                    }
+                                    // Un perfil borrado en modo auto debe detener el servicio:
+                                    // cubre tanto el caso conectado como el desconectado.
+                                    if (currentProfile.isAutoMode &&
+                                        isServiceRunning(CoolerService::class.java)
+                                    ) {
+                                        // El perfil borrado controlaba el servicio: detenerlo limpia el modo auto.
+                                        // Se envía PROFILE_ID para que no tumbe una sesión auto legítima de otro perfil.
+                                        val stopIntent = Intent(this@MainActivity, CoolerService::class.java).apply {
+                                            action = CoolerService.ACTION_STOP_AUTO
+                                            putExtra("PROFILE_ID", profileId)
+                                        }
+                                        startService(stopIntent)
                                     }
                                     profileRepository.deleteProfile(profileId)
                                     navController.popBackStack()
@@ -336,7 +350,7 @@ class MainActivity : ComponentActivity() {
 
                         RGBControlScreen(
                             isConnected = isConnected && currentConnectedProfileId == profileId,
-                            isAutoMode = isAutoMode,
+                            isAutoMode = rgbProfile?.isAutoMode == true,
                             rgbConfig = rgbProfile?.rgbConfig,
                             onNavigateBack = { navController.popBackStack() },
                             onSetColorful = { 
@@ -663,65 +677,67 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleAutoMode(profileId: String) {
-        isAutoMode = !isAutoMode
-        profileRepository.updateAutoMode(profileId, isAutoMode)
-        
-        if (isAutoMode) {
+        val profile = profileRepository.getProfile(profileId)
+        if (profile == null) {
+            Log.e(TAG, "No se encontró perfil con ID: $profileId")
+            Toast.makeText(this, "Error: Perfil no encontrado", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!profile.isAutoMode) {
+            // ACTIVAR: validar TODO antes de persistir el flag y arrancar el servicio.
             if (!BlePermissionManager.hasNotificationPermission(this)) {
                 Toast.makeText(this, "Se requiere permiso de notificaciones para el modo automático", Toast.LENGTH_SHORT).show()
-                isAutoMode = false
+                if (!BlePermissionManager.isRequestInFlight) {
+                    BlePermissionManager.requestPermissions(this) { result ->
+                        if (!result.granted) Log.e(TAG, "Permiso de notificaciones denegado: ${result.denied}")
+                    }
+                }
                 return
             }
-            
-            val profile = profileRepository.getProfile(profileId)
-            
-            if (profile == null) {
-                Log.e(TAG, "No se encontró perfil con ID: $profileId")
-                Toast.makeText(this, "Error: Perfil no encontrado", Toast.LENGTH_SHORT).show()
-                isAutoMode = false
+            if (profile.macAddress.isBlank()) {
+                Toast.makeText(this, "Error: MAC del perfil no válida", Toast.LENGTH_SHORT).show()
                 return
             }
-            
-            // Iniciar servicio en segundo plano con información completa del perfil
+
+            profileRepository.updateAutoMode(profileId, true)
             val serviceIntent = Intent(this, CoolerService::class.java).apply {
                 action = CoolerService.ACTION_START_AUTO
                 putExtra("PROFILE_ID", profile.id)
-                putExtra(CoolerService.EXTRA_DEVICE_TYPE, profile.deviceType.name)
-                putExtra("DEVICE_MAC", profile.macAddress)
-                putExtra("DEVICE_NAME", profile.name)
-                
-                profile.rgbConfig?.let { config ->
-                    putExtra("RGB_EFFECT", config.effect.code.toInt())
-                    putExtra("RGB_RED", config.red)
-                    putExtra("RGB_GREEN", config.green)
-                    putExtra("RGB_BLUE", config.blue)
+            }
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "No se pudo iniciar CoolerService: ${e.message}", e)
+                profileRepository.updateAutoMode(profileId, false)
+                connectionError = "No se pudo iniciar el servicio de modo automático"
+                Toast.makeText(this, "Error al iniciar el modo automático", Toast.LENGTH_SHORT).show()
+                return
             }
-            
-            Log.d(TAG, "Iniciando modo automático para perfil: ${profile.displayName} [${profile.macAddress}]")
-            
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
-            
+
             Toast.makeText(this, "Modo Automático Activado", Toast.LENGTH_SHORT).show()
-            // No se toca el GATT: CoolerBleManager es el propietario único y el
-            // servicio controlará el mismo cooler a través del motor BLE.
-            
+            // No se toca el GATT: CoolerBleManager es el propietario único.
+
         } else {
-            // Desactivar modo automático
+            // DESACTIVAR: el repositorio deja de anunciar auto y el servicio obedece.
+            profileRepository.updateAutoMode(profileId, false)
             if (isServiceRunning(CoolerService::class.java)) {
-                // En lugar de detener el servicio completamente, cambiar a modo manual
-                // Esto mantiene la conexión activa y solo desactiva el ajuste automático
                 val manualIntent = Intent(this, CoolerService::class.java).apply {
                     action = CoolerService.ACTION_SWITCH_TO_MANUAL
+                    putExtra("PROFILE_ID", profileId)
                 }
-                startService(manualIntent)
-                
-                Toast.makeText(this, "Cambiando a Modo Manual...", Toast.LENGTH_SHORT).show()
-                Log.d(TAG, "Modo automático desactivado; el GATT compartido sigue activo")
+                try {
+                    startService(manualIntent)
+                    Toast.makeText(this, "Cambiando a Modo Manual...", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Log.e(TAG, "No se pudo avisar al servicio: ${e.message}", e)
+                    Toast.makeText(this, "Error al desactivar el modo automático", Toast.LENGTH_SHORT).show()
+                }
             } else {
                 Toast.makeText(this, "Modo Automático Desactivado", Toast.LENGTH_SHORT).show()
             }

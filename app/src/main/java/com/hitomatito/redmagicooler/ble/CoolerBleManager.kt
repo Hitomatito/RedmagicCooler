@@ -21,7 +21,6 @@ import com.hitomatito.redmagicooler.CoolerDeviceType
 import com.hitomatito.redmagicooler.BlePermissionManager
 import com.hitomatito.redmagicooler.model.CoolerBleConstants
 import com.hitomatito.redmagicooler.model.LightEffect
-import com.hitomatito.redmagicooler.model.RGBConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -174,6 +173,13 @@ object CoolerBleManager {
     @Volatile
     private var reconnectBackoffMs = 2000L
 
+    // Desconexión solicitada por la app: no emitir ConnectionFailed falso ni reintentar.
+    @Volatile
+    private var intentionalDisconnect = false
+
+    // Cada desconexión/conexión invalida las reconexiones programadas en cola
+    private var reconnectGeneration = 0L
+
     val connectedDevice: CoolerDevice? get() = connectedCoolerDevice
     @Volatile private var discoveryTimedOutFlag = false
 
@@ -318,6 +324,11 @@ object CoolerBleManager {
     ) {
         stopScan()
         closeGattInternal()
+        intentionalDisconnect = false
+        reconnectGeneration++ // conexión nueva: cancelar reconexiones antiguas en espera
+        // Cualquier vía de conexión (connectByMac, scan, reconexión) arranca de cero en reintentos
+        reconnectAttempts = 0
+        reconnectBackoffMs = 2000L
 
         _state.value = ConnectionState.CONNECTING
         connectedCoolerDevice = CoolerDevice(
@@ -340,11 +351,16 @@ object CoolerBleManager {
         }
     }
 
-    /** Desconexión intencional. Cancela reintentos. */
+    /** Desconexión intencional. Cancela reintentos y detiene el escaneo. */
     fun disconnect() {
-        reconnectAttempts = MAX_RECONNECT_ATTEMPTS // bloquea reintentos
+        intentionalDisconnect = true
+        reconnectGeneration++ // desconexión intencional: cancelar reconexiones en espera
+        stopScan()
         closeGattInternal()
         _state.value = ConnectionState.DISCONNECTED
+        // Contrato: siempre emitir Disconnected, incluso en desconexiones intencionales;
+        // el callback GATT posterior no disparará en este camino (bluetoothGatt == null).
+        _events.tryEmit(BleEvent.Disconnected(0, willReconnect = false))
     }
 
     private fun closeGattInternal() {
@@ -378,6 +394,7 @@ object CoolerBleManager {
     /** Reconexión solicitada externamente (p.ej. al restaurar estado tras recrear el servicio). */
     fun requestReconnect(macAddress: String, deviceType: CoolerDeviceType) {
         Log.d(TAG, "Reconexión solicitada para $macAddress (${deviceType.deviceName})")
+        intentionalDisconnect = false
         reconnectAttempts = 0
         reconnectBackoffMs = 2000L
         startScan(lowLatency = false, targetMac = macAddress, targetType = deviceType)
@@ -466,11 +483,13 @@ object CoolerBleManager {
             Log.w(TAG, "Op GATT descartada o fallida: ${op.label} (avanzando cola)")
             completeOp()
         } else {
-            // Respaldo: si el callback no llega, avanzar igualmente
+            // Respaldo: si el callback no llega, avanzar igualmente.
+            // Solo si el GATT sigue siendo el mismo: uno nuevo ya tiene su propia cola.
+            val executingGatt = gatt
             opTimeoutJob?.cancel()
             opTimeoutJob = scope.launch {
                 delay(OP_TIMEOUT_MS)
-                if (opInProgress) {
+                if (opInProgress && bluetoothGatt === executingGatt) {
                     Log.w(TAG, "Timeout de op GATT (${op.label}); forzando avance")
                     completeOp()
                 }
@@ -497,14 +516,6 @@ object CoolerBleManager {
         opTimeoutJob?.cancel()
     }
 
-    /** Aplica una configuración RGB pendiente una vez conectado (uso interno de CoolerService). */
-    fun applyPendingRGB(config: RGBConfig) {
-        scope.launch {
-            delay(1000)
-            setRGBLight(config.effect, config.red, config.green, config.blue)
-        }
-    }
-
     /** Lee la velocidad actual del ventilador. La respuesta llega como evento FanSpeedChanged. */
     fun readFanSpeed(): Boolean {
         val characteristic = fanCharacteristic ?: return false
@@ -515,6 +526,10 @@ object CoolerBleManager {
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (bluetoothGatt !== gatt) {
+                Log.w(TAG, "Callback de un GATT obsoleto ignorado (status=$status, state=$newState)")
+                return
+            }
             when (newState) {
                 android.bluetooth.BluetoothProfile.STATE_CONNECTED -> {
                     isConnected = true
@@ -541,7 +556,10 @@ object CoolerBleManager {
                     _state.value = ConnectionState.DISCONNECTED
                     bluetoothGatt = null
                     connectedCoolerDevice = null
-                    _events.tryEmit(BleEvent.Disconnected(status, willReconnect = !wasIntentional))
+                    // Cerrar el cliente GATT y vaciar la cola pendiente (evita fugas y ops huérfanas)
+                    drainOpQueue()
+                    BleConnectionHelper.safeCloseGatt(gatt, TAG)
+                    _events.tryEmit(BleEvent.Disconnected(status, willReconnect = !wasIntentional && !intentionalDisconnect))
                     if (!wasIntentional) {
                         scheduleReconnect()
                     }
@@ -550,6 +568,7 @@ object CoolerBleManager {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (!isCurrentGatt(gatt)) return
             discoveryTimeoutJob?.cancel()
             discoveryTimeoutJob = null
             if (discoveryTimedOutFlag) {
@@ -558,7 +577,20 @@ object CoolerBleManager {
             }
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Error descubriendo servicios: $status")
-                _events.tryEmit(BleEvent.ConnectionFailed("Error descubriendo servicios ($status)"))
+                _events.tryEmit(BleEvent.Disconnected(status, willReconnect = !intentionalDisconnect))
+                if (!intentionalDisconnect) {
+                    _events.tryEmit(BleEvent.ConnectionFailed("Error descubriendo servicios ($status)"))
+                }
+                // GATT en este estado es inutilizable: cerrarlo y reintentar desde cero
+                drainOpQueue()
+                bluetoothGatt = null
+                connectedCoolerDevice = null
+                isConnected = false
+                _state.value = ConnectionState.DISCONNECTED
+                BleConnectionHelper.safeCloseGatt(gatt, TAG)
+                if (!intentionalDisconnect) {
+                    scheduleReconnect()
+                }
                 return
             }
             val services = gatt.services ?: emptyList()
@@ -583,6 +615,14 @@ object CoolerBleManager {
             handleServicesDiscovered(gatt, services)
         }
 
+        private fun isCurrentGatt(gatt: BluetoothGatt): Boolean {
+            if (bluetoothGatt !== gatt) {
+                Log.w(TAG, "Callback de un GATT obsoleto ignorado (generación nueva)")
+                return false
+            }
+            return true
+        }
+
         @Deprecated("Deprecated in API 33")
         @Suppress("DEPRECATION")
         override fun onCharacteristicWrite(
@@ -590,6 +630,7 @@ object CoolerBleManager {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
+            if (!isCurrentGatt(gatt)) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "writeCharacteristic status=$status")
             } else {
@@ -606,6 +647,7 @@ object CoolerBleManager {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
+            if (!isCurrentGatt(gatt)) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "writeDescriptor status=$status")
             } else {
@@ -621,6 +663,7 @@ object CoolerBleManager {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
+            if (!isCurrentGatt(gatt)) return
             completeOp()
             handleCharacteristicValue(characteristic)
         }
@@ -631,6 +674,7 @@ object CoolerBleManager {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
+            if (!isCurrentGatt(gatt)) return
             handleCharacteristicValue(characteristic)
         }
 
@@ -639,6 +683,7 @@ object CoolerBleManager {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
+            if (!isCurrentGatt(gatt)) return
             @Suppress("DEPRECATION")
             characteristic.value = value
             handleCharacteristicValue(characteristic)
@@ -649,6 +694,7 @@ object CoolerBleManager {
         discoveryTimeoutJob?.cancel()
         discoveryTimeoutJob = scope.launch {
             delay(DISCOVERY_TIMEOUT_MS)
+            if (bluetoothGatt !== gatt) return@launch // GATT obsoleto: ya hay una conexión de turno nuevo
             if (!isConnected || fanCharacteristic != null) return@launch
             discoveryTimedOutFlag = true
             Log.w(TAG, "Timeout de discovery de servicios ($DISCOVERY_TIMEOUT_MS ms)")
@@ -658,9 +704,14 @@ object CoolerBleManager {
             } catch (e: Exception) {
                 Log.w(TAG, "Error cerrando GATT tras timeout: ${e.message}")
             }
+            drainOpQueue()
             bluetoothGatt = null
             isConnected = false
             _state.value = ConnectionState.DISCONNECTED
+            if (intentionalDisconnect) {
+                _events.tryEmit(BleEvent.Disconnected(-1, willReconnect = false))
+                return@launch
+            }
             _events.tryEmit(BleEvent.Disconnected(-1, willReconnect = true))
             _events.tryEmit(BleEvent.ConnectionFailed("El cooler no responde al conectar"))
             scheduleReconnect()
@@ -701,9 +752,17 @@ object CoolerBleManager {
 
         if (fanCharacteristic == null) {
             Log.e(TAG, "Fan characteristic NO encontrada en ningún servicio")
-            _events.tryEmit(BleEvent.ConnectionFailed("El cooler no expuso el servicio del ventilador"))
+            // Emitir Disconnected aquí: el callback posterior llega con bluetoothGatt == null
+            // y lo descarta la guarda de GATT obsoleto.
+            _events.tryEmit(BleEvent.Disconnected(-1, willReconnect = !intentionalDisconnect))
+            if (!intentionalDisconnect) {
+                _events.tryEmit(BleEvent.ConnectionFailed("El cooler no expuso el servicio del ventilador"))
+            }
             closeGattInternal()
             _state.value = ConnectionState.DISCONNECTED
+            if (!intentionalDisconnect) {
+                scheduleReconnect()
+            }
             return
         }
 
@@ -817,6 +876,11 @@ object CoolerBleManager {
     // ------------------------------------------------ reconexión
 
     private fun scheduleReconnect() {
+        if (intentionalDisconnect) {
+            // La desconexión fue decidida por la app: nada que reintentar.
+            Log.d(TAG, "Reconexión omitida: desconexión intencional")
+            return
+        }
         val targetMac = scanTargetMac
         val targetType = scanTargetType
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -824,12 +888,18 @@ object CoolerBleManager {
             _events.tryEmit(BleEvent.ConnectionFailed("No se pudo reconectar tras $MAX_RECONNECT_ATTEMPTS intentos"))
             return
         }
+        val generation = reconnectGeneration
         if (targetMac != null && targetType != null) {
             reconnectAttempts++
             val backoff = reconnectBackoffMs
             Log.d(TAG, "Programando reconexión $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS en ${backoff}ms")
             scope.launch {
                 delay(backoff)
+                // El usuario pudo desconectar/reconectar mientras esperaba el backoff
+                if (generation != reconnectGeneration || intentionalDisconnect) {
+                    Log.d(TAG, "Reconexión cancelada: el contexto cambió durante el backoff")
+                    return@launch
+                }
                 startScan(lowLatency = false, targetMac = targetMac, targetType = targetType, resetAttempts = false)
             }
             reconnectBackoffMs = (reconnectBackoffMs * 2).coerceAtMost(30000L)
@@ -839,6 +909,10 @@ object CoolerBleManager {
         reconnectAttempts++
         scope.launch {
             delay(reconnectBackoffMs)
+            if (generation != reconnectGeneration || intentionalDisconnect) {
+                Log.d(TAG, "Reconexión cancelada: el contexto cambió durante el backoff")
+                return@launch
+            }
             startScan(lowLatency = false, resetAttempts = false)
         }
         reconnectBackoffMs = (reconnectBackoffMs * 2).coerceAtMost(30000L)

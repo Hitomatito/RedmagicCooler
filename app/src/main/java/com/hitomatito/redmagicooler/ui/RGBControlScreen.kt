@@ -78,10 +78,10 @@ fun RGBControlScreen(
             (it.red + it.green + it.blue > 0)
     }
 
-    var redValue by remember { mutableIntStateOf(initialColor?.red ?: 255) }
-    var greenValue by remember { mutableIntStateOf(initialColor?.green ?: 0) }
-    var blueValue by remember { mutableIntStateOf(initialColor?.blue ?: 0) }
-    var selectedEffect by remember { mutableStateOf(rgbConfig?.effect?.toEffectKey()) }
+    var redValue by remember(rgbConfig) { mutableIntStateOf(initialColor?.red ?: 255) }
+    var greenValue by remember(rgbConfig) { mutableIntStateOf(initialColor?.green ?: 0) }
+    var blueValue by remember(rgbConfig) { mutableIntStateOf(initialColor?.blue ?: 0) }
+    var selectedEffect by remember(rgbConfig) { mutableStateOf(rgbConfig?.effect?.toEffectKey()) }
 
     val scrollState = rememberScrollState()
     val currentColor = Color(redValue, greenValue, blueValue)

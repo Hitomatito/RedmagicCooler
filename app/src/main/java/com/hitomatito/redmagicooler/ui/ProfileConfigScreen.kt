@@ -65,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.ThermalMonitor
+import com.hitomatito.redmagicooler.toStatusLabel
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
 import kotlinx.coroutines.delay
@@ -88,23 +89,27 @@ fun ProfileConfigScreen(
     onRenameProfile: (String) -> Unit,
     modifier: Modifier = Modifier,
     connectionError: String? = null,
-    onDismissError: () -> Unit = {}
+    onDismissError: () -> Unit = {},
+    isConnecting: Boolean = false
 ) {
     var fanSpeed by remember(profile.fanSpeed) { mutableIntStateOf(profile.fanSpeed) }
     var isApplying by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
-    var newName by remember { mutableStateOf(profile.name) }
+    var newName by remember(profile.name) { mutableStateOf(profile.name) }
     val scrollState = rememberScrollState()
 
-    // Aplicación automática con debounce
+    // Aplicación automática con debounce; el indicador se libera siempre.
     LaunchedEffect(fanSpeed, profile.isConnected, profile.isAutoMode) {
         if (profile.isConnected && !profile.isAutoMode) {
-            isApplying = true
-            delay(500)
-            onSetFanSpeed(fanSpeed)
-            delay(300)
-            isApplying = false
+            try {
+                isApplying = true
+                delay(500)
+                onSetFanSpeed(fanSpeed)
+                delay(300)
+            } finally {
+                isApplying = false
+            }
         }
     }
 
@@ -242,7 +247,7 @@ fun ProfileConfigScreen(
             ThermalCard(
                 thermalData = thermalData,
                 isAutoMode = profile.isAutoMode,
-                isConnecting = false,
+                isConnecting = isConnecting,
                 onToggleAutoMode = onToggleAutoMode
             )
 
@@ -483,12 +488,7 @@ private fun ThermalCard(
 ) {
     val hasTemperature = thermalData.maxTemp > 0f
 
-    val levelLabel = when (thermalData.tempLevel) {
-        ThermalMonitor.TempLevel.SAFE -> "Normal"
-        ThermalMonitor.TempLevel.WARM -> "Templado"
-        ThermalMonitor.TempLevel.HOT -> "Alta"
-        ThermalMonitor.TempLevel.CRITICAL -> "Crítica"
-    }
+    val levelLabel = thermalData.tempLevel.toStatusLabel()
 
     val chipColor = when (thermalData.tempLevel) {
         ThermalMonitor.TempLevel.SAFE -> MaterialTheme.colorScheme.secondaryContainer

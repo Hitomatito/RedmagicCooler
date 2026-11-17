@@ -15,8 +15,6 @@ import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import com.hitomatito.redmagicooler.model.CoolerBleConstants
 import com.hitomatito.redmagicooler.model.CoolerProfile
-import com.hitomatito.redmagicooler.model.LightEffect
-import com.hitomatito.redmagicooler.model.RGBConfig
 import com.hitomatito.redmagicooler.data.ProfileRepository
 import com.hitomatito.redmagicooler.ble.CoolerBleManager
 import kotlinx.coroutines.CoroutineScope
@@ -46,9 +44,6 @@ class CoolerService : Service() {
         const val ACTION_START_AUTO = "com.hitomatito.redmagicooler.START_AUTO"
         const val ACTION_STOP_AUTO = "com.hitomatito.redmagicooler.STOP_AUTO"
         const val ACTION_SWITCH_TO_MANUAL = "com.hitomatito.redmagicooler.SWITCH_TO_MANUAL"
-        const val ACTION_SET_DEVICE_TYPE = "com.hitomatito.redmagicooler.SET_DEVICE_TYPE"
-        const val ACTION_USE_CONNECTED_DEVICE = "com.hitomatito.redmagicooler.ACTION_USE_CONNECTED_DEVICE"
-        const val EXTRA_DEVICE_TYPE = "device_type"
         
         // SharedPreferences keys
         private const val PREFS_NAME = "cooler_service_prefs"
@@ -62,12 +57,6 @@ class CoolerService : Service() {
         // Métricas de batería
         private const val KEY_BATTERY_START = "battery_start_level"
         private const val KEY_BATTERY_START_TIME = "battery_start_time"
-        
-        // Instancia estática para acceso desde MainActivity (control RGB en modo auto)
-        @Volatile
-        private var instance: CoolerService? = null
-        
-        fun getInstance(): CoolerService? = instance
     }
     
     private var thermalDataCollectionJob: Job? = null
@@ -84,16 +73,27 @@ class CoolerService : Service() {
     private var lastNotifiedTemp = -1f
     private var currentSpeedFromRead = -1 // Para almacenar resultado de lecturas BLE
     private var lastLoggedRecommendedSpeed = -1
+
+    // RGB solo en la activación del modo automático: consume el evento de forma única.
+    private var applyRgbOnNextConnect = false
     
     // Perfil específico para el modo automático
     private var activeProfile: CoolerProfile? = null
     
-    // Configuración RGB pendiente de aplicar
-    private var pendingRGBConfig: RGBConfig? = null
+    // Aplica la configuración RGB guardada en el perfil, si existe, cuando la conexión se estabiliza.
+    private fun applyPerfilRgbWhenSettled() {
+        val rgb = activeProfile?.let { p ->
+            ProfileRepository.getInstance(this).getProfile(p.id)?.rgbConfig ?: p.rgbConfig
+        } ?: return
+        serviceScope.launch {
+            // Pequeña espera: la característica RGB tarda en resolverse tras la conexión.
+            delay(1000)
+            CoolerBleManager.setRGBLight(rgb.effect, rgb.red, rgb.green, rgb.blue)
+        }
+    }
     
     override fun onCreate() {
         super.onCreate()
-        instance = this // Guardar instancia para acceso externo
         logDebug("Servicio creado")
         
         // Inicializar métricas de batería
@@ -132,9 +132,15 @@ class CoolerService : Service() {
                         activeProfile?.let { p ->
                             ProfileRepository.getInstance(this@CoolerService).updateConnectionState(p.id, true)
                         }
-                        pendingRGBConfig?.let { cfg ->
-                            CoolerBleManager.applyPendingRGB(cfg)
-                            pendingRGBConfig = null
+                        if (applyRgbOnNextConnect) {
+                            applyRgbOnNextConnect = false
+                            applyPerfilRgbWhenSettled()
+                        }
+                        // Conexión (re)tras auto: sembrar la rampa con la velocidad física si aún
+                        // no se calibró funcionalmente. Es idempotente y cubre el caso en que
+                        // activate-Auto se emitió con el cooler desconectado.
+                        if (activeProfile != null) {
+                            performInitialCalibration()
                         }
                         updateNotification("Conectado", currentSpeed, currentTemp)
                     }
@@ -172,87 +178,55 @@ class CoolerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_AUTO -> {
-                // Al iniciar modo automático, cargar perfil desde el intent
+                // El perfil persistido es la fuente de verdad: el servicio no inventa un perfil.
                 val profileId = intent.getStringExtra("PROFILE_ID")
-                val deviceTypeName = intent.getStringExtra(EXTRA_DEVICE_TYPE)
-                val deviceMac = intent.getStringExtra("DEVICE_MAC")
-                val deviceName = intent.getStringExtra("DEVICE_NAME")
+                val profile = profileId?.let { ProfileRepository.getInstance(this).getProfile(it) }
 
-                if (deviceTypeName != null && deviceMac != null) {
-                    val deviceType = try {
-                        CoolerDeviceType.valueOf(deviceTypeName)
-                    } catch (_: IllegalArgumentException) {
-                        null
-                    }
-
-                    if (deviceType != null) {
-                        // Crear perfil activo para el servicio
-                        activeProfile = CoolerProfile(
-                            id = profileId ?: "service_profile",
-                            name = deviceName ?: deviceType.deviceName,
-                            deviceType = deviceType,
-                            macAddress = deviceMac,
-                            isConnected = false,
-                            isAutoMode = true
-                        )
-
-                        logDebug("Modo automatico iniciado con perfil: ${activeProfile?.displayName}")
-
-                        // Guardar preferencia
-                        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                            .edit {
-                                putString("ACTIVE_PROFILE_ID", activeProfile?.id)
-                                    .putString(
-                                        "ACTIVE_PROFILE_TYPE",
-                                        activeProfile?.deviceType?.name
-                                    )
-                                    .putString("ACTIVE_PROFILE_MAC", activeProfile?.macAddress)
-                                    .putString("ACTIVE_PROFILE_NAME", activeProfile?.name)
-                            }
-
-                        // Cargar configuración RGB si viene en el Intent
-                        if (intent.hasExtra("RGB_EFFECT")) {
-                            val effectCode = intent.getIntExtra("RGB_EFFECT", LightEffect.ALWAYS_BRIGHT.code.toInt()).toByte()
-                            val effect = LightEffect.entries.find { it.code == effectCode } ?: LightEffect.ALWAYS_BRIGHT
-                            val red = intent.getIntExtra("RGB_RED", 0)
-                            val green = intent.getIntExtra("RGB_GREEN", 0)
-                            val blue = intent.getIntExtra("RGB_BLUE", 0)
-
-                            // Guardar para aplicar después de conectar
-                            pendingRGBConfig = RGBConfig(effect, red, green, blue)
-                            logDebug("Configuracion RGB cargada: ${effect.name} R:$red G:$green B:$blue")
-                        }
-
-                        // Reutilizar conexión si el motor BLE ya está conectado a ESTE cooler
-                        // (evita el ciclo desconectar+volver a conectar+re-discovery al activar Auto)
-                        val yaConectado = CoolerBleManager.isHealthy() &&
-                            CoolerBleManager.currentConnectedAddress()?.equals(deviceMac, ignoreCase = true) == true
-                        if (yaConectado) {
-                            logDebug("Ya conectado al cooler. No hace falta reconectar (modo automático)")
-                            pendingRGBConfig?.let { cfg ->
-                                CoolerBleManager.applyPendingRGB(cfg)
-                                pendingRGBConfig = null
-                            }
-                        } else {
-                            // Conectar directamente al dispositivo usando su MAC
-                            logDebug("Conectando al dispositivo del perfil: $deviceMac")
-                            activeProfile?.let { p -> CoolerBleManager.connectByMac(p.macAddress, p.deviceType) }
-                        }
-                        // Realizar calibración inicial después de conectar
-                        performInitialCalibration()
-                        startThermalMonitoring()
-                    } else {
-                        Log.e(TAG, "Tipo de dispositivo invalido recibido: $deviceTypeName")
-                        updateNotification("Error: Perfil inválido", 0, 0f)
-                    }
+                if (profile == null) {
+                    Log.e(TAG, "ACTION_START_AUTO: no se encontró el perfil (id=$profileId)")
+                    updateNotification("Error: Perfil no encontrado", 0, 0f)
                 } else {
-                    Log.e(TAG, "Informacion de perfil incompleta en ACTION_START_AUTO")
-                    updateNotification("Error: Sin perfil", 0, 0f)
+                    activeProfile = profile.copy(isAutoMode = true)
+                    logDebug("Modo automatico iniciado con perfil: ${activeProfile?.displayName}")
+
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .edit {
+                            putString("ACTIVE_PROFILE_ID", activeProfile?.id)
+                                .putString("ACTIVE_PROFILE_TYPE", activeProfile?.deviceType?.name)
+                                .putString("ACTIVE_PROFILE_MAC", activeProfile?.macAddress)
+                                .putString("ACTIVE_PROFILE_NAME", activeProfile?.name)
+                        }
+
+                    applyRgbOnNextConnect = true
+                    // Reutilizar conexión si el motor BLE ya está conectado a ESTE cooler
+                    // (evita el ciclo desconectar+volver a conectar+re-discovery al activar Auto)
+                    val yaConectado = CoolerBleManager.isHealthy() &&
+                        CoolerBleManager.currentConnectedAddress()?.equals(profile.macAddress, ignoreCase = true) == true
+                    if (yaConectado) {
+                        logDebug("Ya conectado al cooler. No hace falta reconectar (modo automático)")
+                        applyRgbOnNextConnect = false
+                        applyPerfilRgbWhenSettled()
+                    } else {
+                        logDebug("Conectando al dispositivo del perfil: ${profile.macAddress}")
+                        CoolerBleManager.connectByMac(profile.macAddress, profile.deviceType)
+                    }
+                    // Realizar calibración inicial después de conectar
+                    performInitialCalibration()
+                    startThermalMonitoring()
                 }
             }
             ACTION_STOP_AUTO -> {
+                val targetProfileId = intent.getStringExtra("PROFILE_ID")
+                val current = activeProfile?.id
+                // Si piden parar un perfil concreto:
+                // - con sesión activa de otro perfil: no tumbes la ajena
+                // - sin sesión activa: no desconectes un cooler que la UI pueda tener manualmente
+                if (targetProfileId != null && targetProfileId != current) {
+                    Log.w(TAG, "ACTION_STOP_AUTO ignorado: el perfil pedido ($targetProfileId) no es el activo (${current ?: "ninguno"})")
+                    return START_NOT_STICKY
+                }
                 Log.d(TAG, "ACTION_STOP_AUTO: Deteniendo servicio y liberando recursos")
-                
+
                  // Detener monitoreo térmico automático; el monitor compartido sigue alimentando la UI
                 thermalDataCollectionJob?.cancel()
                 thermalDataCollectionJob = null
@@ -270,94 +244,36 @@ class CoolerService : Service() {
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit { clear() }
                 
                 // Detener servicio (NO mata el proceso de la app)
+                activeProfile = null
                 stopSelf()
             }
             ACTION_SWITCH_TO_MANUAL -> {
+                val targetProfileId = intent.getStringExtra("PROFILE_ID")
+                val current = activeProfile?.id
+                if (targetProfileId != null && current != null && targetProfileId != current) {
+                    Log.w(TAG, "ACTION_SWITCH_TO_MANUAL ignorado: el perfil pedido ($targetProfileId) no es el activo ($current)")
+                    return START_NOT_STICKY
+                }
                 Log.d(TAG, "ACTION_SWITCH_TO_MANUAL: Cambiando a modo manual sin desconectar")
                 switchToManualMode()
             }
-            ACTION_USE_CONNECTED_DEVICE -> {
-                // Conectar directamente usando la MAC del dispositivo ya conectado
-                val deviceMac = intent.getStringExtra("DEVICE_MAC")
-                if (deviceMac != null) {
-                    Log.d(TAG, "Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
-                    activeProfile?.let { p -> CoolerBleManager.connectByMac(deviceMac, p.deviceType) }
-                } else {
-                    Log.e(TAG, "No se recibio MAC del dispositivo")
-                }
-            }
-            ACTION_SET_DEVICE_TYPE -> {
-                // Cambiar perfil activo
-                val profileId = intent.getStringExtra("PROFILE_ID")
-                val deviceTypeName = intent.getStringExtra(EXTRA_DEVICE_TYPE)
-                val deviceMac = intent.getStringExtra("DEVICE_MAC")
-                val deviceName = intent.getStringExtra("DEVICE_NAME")
-
-                if (deviceTypeName != null && deviceMac != null) {
-                    val deviceType = try {
-                        CoolerDeviceType.valueOf(deviceTypeName)
-                    } catch (_: IllegalArgumentException) {
-                        null
-                    }
-
-                    if (deviceType != null) {
-                        activeProfile = CoolerProfile(
-                            id = profileId ?: "service_profile",
-                            name = deviceName ?: deviceType.deviceName,
-                            deviceType = deviceType,
-                            macAddress = deviceMac,
-                            isConnected = false,
-                            isAutoMode = true
-                        )
-
-                        logDebug("Perfil activo configurado: ${activeProfile?.displayName}")
-
-                        // Guardar preferencia
-                        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                            .edit {
-                                putString("ACTIVE_PROFILE_ID", activeProfile?.id)
-                                putString("ACTIVE_PROFILE_TYPE", activeProfile?.deviceType?.name)
-                                putString("ACTIVE_PROFILE_MAC", activeProfile?.macAddress)
-                                putString("ACTIVE_PROFILE_NAME", activeProfile?.name)
-                            }
-
-                        // El motor BLE decide el estado real de escaneo/conexión
-                        CoolerBleManager.stopScan()
-
-                        // Solo iniciar conexión si hay perfil configurado
-                        if (activeProfile != null) {
-                            activeProfile?.let { p -> CoolerBleManager.requestReconnect(p.macAddress, p.deviceType) }
-                            startThermalMonitoring()
-                        }
-                    }
-                }
-            }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
     
     override fun onBind(intent: Intent?): IBinder? = null
     
     override fun onDestroy() {
         super.onDestroy()
-        instance = null // Limpiar instancia
         logDebug("Servicio destruido")
         
         // Mostrar métricas finales de batería
         logBatteryMetrics()
         
-        // CRÍTICO: Limpiar estado del perfil SIEMPRE al destruir
-        activeProfile?.let { profile ->
-            try {
-                ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
-                ProfileRepository.getInstance(this).updateConnectionState(profile.id, false)
-                Log.d(TAG, "Estado del perfil ${profile.name} limpiado en onDestroy")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error limpiando estado del perfil: ${e.message}")
-            }
-        }
-        
-        // Guardar estado antes de destruir
+        // NO tocar ProfileRepository aquí: la muerte del proceso no debe borrar el flag de auto.
+        // STOP_AUTO y SWITCH_TO_MANUAL son los únicos autorizados a desactivarlo.
+
+        // Persistir estado coherente antes de destruir (sin perfil -> borra ACTIVE_PROFILE_*)
         saveState()
         
         // Detener monitoreo y cancelar coroutines.
@@ -374,39 +290,29 @@ class CoolerService : Service() {
      * Este método NO desconecta el dispositivo, solo cambia el modo de operación
      */
     private fun switchToManualMode() {
-        if (!CoolerBleManager.setAutoMode()) {
-            Log.e(TAG, "No se pudo escribir el comando de cambio a modo manual")
-            updateNotification("Error cambiando a manual", currentSpeed, currentTemp)
-            return
+        // La escritura 0x1018 es best-effort: el firmware la trata como toggle,
+        // así que el software no puede verificarla. La fuente de verdad del
+        // estado lógico sigue siendo el repositorio, con actualización siempre.
+        // Sin perfil activo no hay nada que escribir: el toggle haría lo contrario de lo pedido.
+        val writeOk = activeProfile?.let { CoolerBleManager.setAutoMode() } ?: true
+        if (!writeOk) {
+            Log.e(TAG, "No se pudo escribir el comando de cambio a modo manual; el perfil se marca igualmente en manual")
+            updateNotification("Aviso: cooler quizás siga en auto", currentSpeed, currentTemp)
         }
-        
-        try {
-            run {
-                // Actualizar perfil en el repositorio
-                activeProfile?.let { profile ->
-                    ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
-                    Log.d(TAG, "Perfil actualizado: modo manual activado")
-                }
-                
-                // Actualizar notificación
-                updateNotification("Modo Manual", currentSpeed, currentTemp)
-                
-                // Detener monitoreo térmico automático; el monitor compartido sigue alimentando la UI
-                thermalDataCollectionJob?.cancel()
-                thermalDataCollectionJob = null
-                
-                // Opcional: detener el servicio después de cambiar a manual
-                // El servicio puede seguir activo para mantener la conexión
-                serviceScope.launch {
-                    delay(2000) // Dar tiempo para que el comando se procese
-                    Log.d(TAG, "Deteniendo servicio después de cambiar a modo manual")
-                    stopSelf()
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Excepción al cambiar a modo manual: ${e.message}", e)
-            updateNotification("Error: ${e.message}", currentSpeed, currentTemp)
+
+        // Cancelar el bucle antes que nada para que ningún ajuste llegue tarde.
+        thermalDataCollectionJob?.cancel()
+        thermalDataCollectionJob = null
+
+        activeProfile?.let { profile ->
+            ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
+            Log.d(TAG, "Perfil actualizado: modo manual activado")
         }
+
+        activeProfile = null
+        updateNotification("Modo Manual", currentSpeed, currentTemp)
+        saveState() // activeProfile == null -> borra ACTIVE_PROFILE_* para que no resucite
+        stopSelf()
     }
     
     private fun createNotificationChannel() {
@@ -438,6 +344,7 @@ class CoolerService : Service() {
         
         val manualIntent = Intent(this, CoolerService::class.java).apply {
             action = ACTION_SWITCH_TO_MANUAL
+            activeProfile?.id?.let { putExtra("PROFILE_ID", it) }
         }
         val manualPendingIntent = PendingIntent.getService(
             this, 1, manualIntent,
@@ -585,37 +492,34 @@ class CoolerService : Service() {
                         val currentDeviceSpeed = readCurrentFanSpeed()
                         if (currentDeviceSpeed >= 0) {
                             currentSpeed = currentDeviceSpeed
+                            // Sembrar la rampa compartida con la velocidad física:
+                            // si no, arranca en 0 y el lazo inicial bajaría el fan indebidamente.
+                            ThermalMonitorManager.seedRamp(currentDeviceSpeed)
                             logDebug("Calibración inicial - Velocidad actual del cooler: $currentSpeed%")
-                            
+
                             // Actualizar notificación con datos calibrados
-                            val tempStatus = when (thermalData.tempLevel) {
-                                ThermalMonitor.TempLevel.SAFE -> "Normal"
-                                ThermalMonitor.TempLevel.WARM -> "Tibio" 
-                                ThermalMonitor.TempLevel.HOT -> "Caliente"
-                                ThermalMonitor.TempLevel.CRITICAL -> "Crítico"
-                            }
-                            updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
-                            
-                            // Si la velocidad recomendada es significativamente diferente, aplicar ajuste inicial
-                            val recommendedSpeed = thermalData.recommendedSpeed
-                            if (abs(recommendedSpeed - currentSpeed) >= 15) {
-                                logDebug("Aplicando ajuste inicial: $currentSpeed% → $recommendedSpeed%")
-                                setFanSpeed(recommendedSpeed)
+                            updateNotificationIfNeeded(thermalData.tempLevel.toStatusLabel(), currentSpeed, currentTemp)
+
+                            // El salto ideal de la curva es la referencia de catch-up al activar.
+                            // Solo subir: la bajada la lleva la rampa con su histéresis.
+                            val targetSpeed = ThermalPolicy.targetSpeed(thermalData.maxTemp)
+                            if (targetSpeed - currentSpeed >= 15) {
+                                logDebug("Aplicando ajuste inicial: $currentSpeed% → $targetSpeed%")
+                                setFanSpeed(targetSpeed)
                             } else {
-                                logDebug("Velocidad actual ($currentSpeed%) está cerca de la recomendada ($recommendedSpeed%), manteniendo")
+                                logDebug("Velocidad actual ($currentSpeed%) suficiente respecto a objetivo ($targetSpeed%); la bajada la llevará la rampa")
                             }
                         } else {
-                            logDebug("No se pudo leer velocidad actual del cooler, usando velocidad recomendada")
-                            // Usar velocidad recomendada como inicial
-                            val recommendedSpeed = thermalData.recommendedSpeed
-                            setFanSpeed(recommendedSpeed)
-                            currentSpeed = recommendedSpeed
+                            logDebug("No se pudo leer velocidad actual del cooler, usando objetivo de curva")
+                            val targetSpeed = ThermalPolicy.targetSpeed(thermalData.maxTemp)
+                            setFanSpeed(targetSpeed)
+                            currentSpeed = targetSpeed
                         }
                     } catch (e: Exception) {
-                        logDebug("Error leyendo velocidad actual: ${e.message}, usando velocidad recomendada")
-                        val recommendedSpeed = thermalData.recommendedSpeed
-                        setFanSpeed(recommendedSpeed)
-                        currentSpeed = recommendedSpeed
+                        logDebug("Error leyendo velocidad actual: ${e.message}, usando objetivo de curva")
+                        val targetSpeed = ThermalPolicy.targetSpeed(thermalData.maxTemp)
+                        setFanSpeed(targetSpeed)
+                        currentSpeed = targetSpeed
                     }
                 } else {
                     logDebug("Cooler no conectado, esperando conexión para calibración")
@@ -662,13 +566,8 @@ class CoolerService : Service() {
                     }
                 }
                 
-                val tempStatus = when (data.tempLevel) {
-                    ThermalMonitor.TempLevel.SAFE -> "Normal"
-                    ThermalMonitor.TempLevel.WARM -> "Tibio"
-                    ThermalMonitor.TempLevel.HOT -> "Caliente"
-                    ThermalMonitor.TempLevel.CRITICAL -> "Critico"
-                }
-                
+                val tempStatus = data.tempLevel.toStatusLabel()
+
                 // Actualizar notificación (se actualizará automáticamente si hay cambios significativos)
                 updateNotificationIfNeeded(tempStatus, currentSpeed, currentTemp)
             } else {
@@ -691,12 +590,7 @@ class CoolerService : Service() {
         
         // Actualizar notificación inmediatamente al cambiar velocidad
         if (previousSpeed != speed) {
-            val tempStatus = when {
-                currentTemp >= ThermalMonitor.TEMP_CRITICAL -> "Critico"
-                currentTemp >= ThermalMonitor.TEMP_HOT -> "Caliente"
-                currentTemp >= ThermalMonitor.TEMP_WARM -> "Tibio"
-                else -> "Normal"
-            }
+            val tempStatus = ThermalPolicy.tempLevel(currentTemp).toStatusLabel()
             updateNotification(tempStatus, currentSpeed, currentTemp)
             lastNotifiedSpeed = currentSpeed
             lastNotifiedTemp = currentTemp
@@ -738,28 +632,19 @@ class CoolerService : Service() {
             currentTemp = prefs.getFloat(KEY_LAST_TEMP, 0f)
             currentSpeed = prefs.getInt(KEY_LAST_SPEED, 0)
 
-            // Cargar perfil activo
+            // Cargar perfil activo; el repositorio manda: si allí el auto no está activo,
+            // las prefs del servicio son restos de un ciclo anterior y se descartan.
             val profileId = prefs.getString("ACTIVE_PROFILE_ID", null)
-            val deviceTypeName = prefs.getString("ACTIVE_PROFILE_TYPE", null)
-            val deviceMac = prefs.getString("ACTIVE_PROFILE_MAC", null)
-            val deviceName = prefs.getString("ACTIVE_PROFILE_NAME", null)
-
-            if (deviceTypeName != null && deviceMac != null) {
-                val deviceType = try {
-                    CoolerDeviceType.valueOf(deviceTypeName)
-                } catch (_: IllegalArgumentException) {
-                    null
-                }
-
-                if (deviceType != null) {
-                    activeProfile = CoolerProfile(
-                        id = profileId ?: "service_profile",
-                        name = deviceName ?: deviceType.deviceName,
-                        deviceType = deviceType,
-                        macAddress = deviceMac,
-                        isConnected = false,
-                        isAutoMode = true
-                    )
+            val repoProfile = profileId?.let { ProfileRepository.getInstance(this).getProfile(it) }
+            if (repoProfile != null && repoProfile.isAutoMode) {
+                activeProfile = repoProfile.copy(isConnected = false, isAutoMode = true)
+            } else if (profileId != null) {
+                Log.w(TAG, "Estado guardado obsoleto (id=$profileId); se descarta")
+                prefs.edit {
+                    remove("ACTIVE_PROFILE_ID")
+                    remove("ACTIVE_PROFILE_TYPE")
+                    remove("ACTIVE_PROFILE_MAC")
+                    remove("ACTIVE_PROFILE_NAME")
                 }
             }
 
@@ -774,29 +659,6 @@ class CoolerService : Service() {
         if (DEBUG) {
             Log.d(TAG, message)
         }
-    }
-    
-    /**
-     * Establece el color y efecto de luz RGB del cooler
-     * @param effect Efecto de luz a aplicar
-     * @param red Componente rojo (0-255)
-     * @param green Componente verde (0-255)
-     * @param blue Componente azul (0-255)
-     */
-    @Suppress("DEPRECATION")
-    fun setRGBLight(effect: LightEffect, red: Int = 0, green: Int = 0, blue: Int = 0) {
-        // Formato: [modo][RR][GG][BB] - gestionado por el motor BLE
-        if (!CoolerBleManager.setRGBLight(effect, red, green, blue)) {
-            Log.e(TAG, "Error enviando comando RGB (no conectado o write fallido)")
-            return
-        }
-        val hexColor = "%02x%02x%02x%02x".format(
-            effect.code.toInt() and 0xFF,
-            red and 0xFF,
-            green and 0xFF,
-            blue and 0xFF
-        )
-        Log.d(TAG, "Comando RGB enviado: $hexColor (efecto: ${effect.name}, R:$red G:$green B:$blue)")
     }
     
     // Funciones de métricas de batería
