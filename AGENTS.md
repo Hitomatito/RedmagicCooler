@@ -9,7 +9,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
   export JAVA_HOME="$HOME/.gradle/jdks/eclipse_adoptium-21-amd64-linux.2"   # Temurin 21.0.7
   ```
 - Android SDK: `~/Android/Sdk` (wired in `local.properties`, platform `android-37.0`, build-tools `36.0.0`).
-- Toolchain: Gradle 9.9.1 (wrapper), AGP 9.5.1, Kotlin 2.4.21 (`gradle/libs.versions.toml`). The tracked `gradle/gradle-daemon-jvm.properties` pins the daemon JVM via the foojay resolver plugin in `settings.gradle.kts`; the exported `JAVA_HOME` above is still needed for direct `./gradlew` launches.
+- Toolchain: Gradle 9.9.1 (wrapper), AGP 9.5.1, Kotlin 2.4.21 (`gradle/libs.versions.toml` — the README badge saying 2.3 is stale). The tracked `gradle/gradle-daemon-jvm.properties` pins the daemon JVM to **JDK 25** (JetBrains, auto-provisioned via the foojay resolver plugin in `settings.gradle.kts`); the exported `JAVA_HOME` above (JDK 21) is still needed for direct `./gradlew` launches. CI sets up JDK 21.
 - `.idea/` is partially tracked (code styles, run configurations, inspection profiles are committed; `caches/`, `workspace.xml` etc. are gitignored). Don't commit IDE noise blindly.
 - Android Studio may rewrite `gradle/libs.versions.toml` and `gradle/wrapper/gradle-wrapper.properties` on sync (version upgrades). If those are dirty and you didn’t touch them, don’t commit them blindly. The current wrapper bump keeps `retries=0` and `retryBackOffMs=500`; change those only when intentionally updating Gradle.
 
@@ -23,8 +23,9 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
 # Single test: ./gradlew :app:testDebugUnitTest --tests "com.hitomatito.redmagicooler.ExampleUnitTest"
 ```
 
-- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon`. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
-- `assembleRelease` enables R8 minify + resource shrinking; keep `app/proguard-rules.pro` WorkManager/line-number rules when adding workers.
+- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon`. The README's `./gradlew test` is not the CI command. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
+- App version lives in `app/build.gradle.kts` `defaultConfig`: `versionCode = 7`, `versionName = "1.4.0"` (bump both for `chore: subir versión` commits).
+- `assembleRelease` enables R8 minify + resource shrinking (v2/v3/v4 signing when `keystore.properties` exists); keep `app/proguard-rules.pro` WorkManager/line-number rules when adding workers.
 - Release signing is conditional on root `keystore.properties` (gitignored, never commit); without it release builds unsigned.
 - `--offline` works for `testDebugUnitTest`, `assembleDebug`, `lintDebug` and `assembleRelease` once cached; `assembleRelease` may need network for uncached artifacts.
 
@@ -38,7 +39,7 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 | Centralized runtime permissions | `BlePermissionManager.kt` |
 | Compose UI + navigation | `MainActivity.kt`, `ui/` |
 | Auto-mode foreground service (client of BLE engine) | `CoolerService.kt` |
-| Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt`, `ThermalMonitorManager.kt` (singleton; `initialize(context)` once, UI + service share it) |
+| Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt` (Android wrapper: sensors, loop, lock), `ThermalLogic.kt` (pure Kotlin: EMA, trend, ramp, thresholds — no Android/clock), `ThermalMonitorManager.kt` (singleton; `initialize(context)` once, UI + service share it) |
 | Profile persistence (SharedPreferences + JSON, `StateFlow`) | `data/ProfileRepository.kt` (singleton) |
 | Scanner/connection helpers | `utils/BleConnectionHelper.kt` |
 | Supported cooler models (manufacturer subtype + drawable) | `CoolerDeviceType.kt` (**package root, not `model/`**) |
@@ -48,7 +49,7 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 
 **`CoolerBleManager` is the single BLE GATT owner.** `MainActivity` and `CoolerService` are clients: they observe `CoolerBleManager.state`/`events` and issue commands (`startScan`, `enqueueOp` via public command functions, `requestReconnect`, `applyPendingRGB`). Do not create a second `BluetoothGatt` in Activity/Service; extend the manager’s op queue instead.
 
-Automatic mode state is coordinated through `CoolerService` intents (`ACTION_START_AUTO`, `ACTION_STOP_AUTO`, `ACTION_SWITCH_TO_MANUAL`) and the selected profile in `ProfileRepository`. No separate persisted active-profile id is kept. Manual-mode UI stays available while disconnected, but is disabled when the profile’s auto mode is on.
+Automatic mode state is coordinated through `CoolerService` intents (`ACTION_START_AUTO`, `ACTION_STOP_AUTO`, `ACTION_SWITCH_TO_MANUAL`, `ACTION_SET_DEVICE_TYPE`, `ACTION_USE_CONNECTED_DEVICE`) and the selected profile in `ProfileRepository`; `CoolerService` also exposes a static instance for MainActivity's RGB control in auto mode. No separate persisted active-profile id is kept (the legacy `active_profile` key is actively removed on startup). Manual-mode UI stays available while disconnected, but is disabled when the profile’s auto mode is on.
 
 ## BLE protocol facts (reverse-engineered, no public spec)
 
@@ -67,15 +68,14 @@ The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` →
 
 - **UI strings are hardcoded Spanish** — `res/values/strings.xml` contains only `app_name`, and there is zero `stringResource` usage in the codebase. Inline Spanish literals are the existing convention; don’t route new strings through `strings.xml` unless asked to localize.
 - Code comments, KDoc and log messages are in **Spanish**; the README is in **English**. Match the file you edit.
-- Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.3.0`, `docs: ...`. Recent commits mix in English. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main` (one `feat/<english-slug>` branch exists).
+- Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.4.0`, `docs: ...`. Recent commits mix in English. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main` (one `feat/<english-slug>` branch exists).
 - `settings.gradle.kts` has `rootProject.name = "RedmagiCooler"` (missing "c") while the application id, package and app label are `RedmagicCooler` / `redmagicooler`. Don’t rename casually — it changes the Gradle module name.
 - `CoolerService.DEBUG = true` gates verbose logging; the comment says flip it to `false` for production. It's a `private const val`, so flip it by editing the file.
-- Compose lint rule: the first optional parameter on a `@Composable` should be `modifier: Modifier = Modifier`.
 
 ## Testing reality
 
-- The only tests are the AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`). **There is no real test coverage** and no mocking library is wired up (`testImplementation` is plain JUnit4 only — no MockK, no Robolectric, no Turbine). Adding them means adding dependencies to `gradle/libs.versions.toml`.
-- Code that touches Android framework classes (`Context`, `BluetoothGatt`, `SensorManager`) is currently untestable as written; extracting pure logic is usually the easiest path to coverage.
+- Real coverage exists only for thermal logic: `ThermalLogicTest.kt` (19 JUnit4 tests, pure JVM — no Android classes, no new deps). Everything else is still the AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`). No mocking library is wired up (`testImplementation` is plain JUnit4 only — no MockK, no Robolectric, no Turbine); adding Android-dependent tests means adding deps to `gradle/libs.versions.toml`.
+- Code that touches Android framework classes (`Context`, `BluetoothGatt`, `SensorManager`) is untestable as written; extracting pure logic (as done with `ThermalLogic.kt`) is the established path to coverage.
 
 ## Do not
 
