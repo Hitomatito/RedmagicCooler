@@ -37,7 +37,7 @@ class CoolerService : Service() {
     companion object {
         private const val TAG = "CoolerService"
         private const val NOTIFICATION_ID = 1001
-        private const val CHANNEL_ID = "cooler_service_channel"
+        private const val CHANNEL_ID = "cooler_service_channel_v2"
         // Azul de la paleta clara de respaldo (los dispositivos con Material You ignoran el tint).
         private const val NOTIFICATION_COLOR = 0xFF415F91.toInt()
         // Niveles térmicos que se pasan a la notificación; cualquier otro texto es estado transitorio.
@@ -55,9 +55,9 @@ class CoolerService : Service() {
         private const val KEY_LAST_TEMP = "last_temperature"
         private const val KEY_LAST_SPEED = "last_speed"
         
-        // Logging condicional - CAMBIAR A FALSE PARA PRODUCCIÓN
-        // En producción, solo se mostrarán logs de error/warning, ahorrando ~1-2MB de memoria
-        private const val DEBUG = true
+        // Logging condicional según el variant: debug=true, release=false.
+        // En release, además, R8 elimina Log.d/Log.i (ver proguard-rules.pro).
+        private val DEBUG = BuildConfig.DEBUG
         
         // Métricas de batería
         private const val KEY_BATTERY_START = "battery_start_level"
@@ -251,7 +251,7 @@ class CoolerService : Service() {
                 }
             }
             ACTION_STOP_AUTO -> {
-                Log.d(TAG, "ACTION_STOP_AUTO: Deteniendo servicio y liberando recursos")
+                logDebug("ACTION_STOP_AUTO: Deteniendo servicio y liberando recursos")
                 
                  // Detener monitoreo térmico automático; el monitor compartido sigue alimentando la UI
                 thermalDataCollectionJob?.cancel()
@@ -266,6 +266,10 @@ class CoolerService : Service() {
                     ProfileRepository.getInstance(this).updateConnectionState(profile.id, false)
                 }
                 
+                // Limpiar el perfil activo: si queda en memoria, onDestroy → saveState()
+                // lo vuelve a persistir y una recreación del servicio reactivaría el modo auto.
+                clearActiveProfileState()
+
                 // Limpiar estado guardado
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit { clear() }
                 
@@ -273,14 +277,14 @@ class CoolerService : Service() {
                 stopSelf()
             }
             ACTION_SWITCH_TO_MANUAL -> {
-                Log.d(TAG, "ACTION_SWITCH_TO_MANUAL: Cambiando a modo manual sin desconectar")
+                logDebug("ACTION_SWITCH_TO_MANUAL: Cambiando a modo manual sin desconectar")
                 switchToManualMode()
             }
             ACTION_USE_CONNECTED_DEVICE -> {
                 // Conectar directamente usando la MAC del dispositivo ya conectado
                 val deviceMac = intent.getStringExtra("DEVICE_MAC")
                 if (deviceMac != null) {
-                    Log.d(TAG, "Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
+                    logDebug("Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
                     activeProfile?.let { p -> CoolerBleManager.connectByMac(deviceMac, p.deviceType) }
                 } else {
                     Log.e(TAG, "No se recibio MAC del dispositivo")
@@ -346,21 +350,19 @@ class CoolerService : Service() {
         // Mostrar métricas finales de batería
         logBatteryMetrics()
         
-        // Limpiar el modo auto al destruir. La conexión NO se cierra aquí (el GATT
-        // es compartido con MainActivity), así que solo marcamos el perfil como
-        // desconectado si el motor BLE ya no está conectado: marcarlo siempre dejaba
-        // la UI en "Desconectado" mientras el cooler seguía conectado tras pasar a manual.
+        // La conexión NO se cierra aquí (el GATT es compartido con MainActivity).
+        // El modo auto se apaga en ACTION_STOP_AUTO y en switchToManualMode; si el
+        // perfil sigue activo al destruirse el servicio, el modo auto sigue vigente
+        // y desactivarlo aquí dejaría la UI en manual mientras el cooler sigue en auto.
         activeProfile?.let { profile ->
             try {
                 val repository = ProfileRepository.getInstance(this)
-                repository.updateAutoMode(profile.id, false)
                 val stillConnected =
                     CoolerBleManager.state.value == CoolerBleManager.ConnectionState.CONNECTED
                 if (!stillConnected) {
                     repository.updateConnectionState(profile.id, false)
                 }
-                Log.d(
-                    TAG,
+                logDebug(
                     "Estado del perfil ${profile.name} limpiado en onDestroy " +
                         "(BLE conectado=$stillConnected)"
                 )
@@ -388,7 +390,20 @@ class CoolerService : Service() {
     private fun switchToManualMode() {
         if (!CoolerBleManager.setAutoMode()) {
             Log.e(TAG, "No se pudo escribir el comando de cambio a modo manual")
-            updateNotification("Error cambiando a manual", currentSpeed, currentTemp)
+            // Sin GATT el cooler puede seguir en auto, pero gana la intención del usuario:
+            // apagamos el control automático de la app para no dejar el switch trabado
+            // y permitir el control manual cuando vuelva a conectarse.
+            activeProfile?.let { profile ->
+                ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
+            }
+            clearActiveProfileState()
+            thermalDataCollectionJob?.cancel()
+            thermalDataCollectionJob = null
+            updateNotification("Manual (sin conexión)", currentSpeed, currentTemp)
+            serviceScope.launch {
+                delay(2000)
+                stopSelf()
+            }
             return
         }
         
@@ -397,8 +412,11 @@ class CoolerService : Service() {
                 // Actualizar perfil en el repositorio
                 activeProfile?.let { profile ->
                     ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
-                    Log.d(TAG, "Perfil actualizado: modo manual activado")
+                    logDebug("Perfil actualizado: modo manual activado")
                 }
+                // Sin esto, el perfil seguiría en memoria y en prefs: onDestroy lo
+                // reaparecería y una recreación del servicio reactivaría el auto.
+                clearActiveProfileState()
                 
                 // Actualizar notificación
                 updateNotification("Modo Manual", currentSpeed, currentTemp)
@@ -411,7 +429,7 @@ class CoolerService : Service() {
                 // El servicio puede seguir activo para mantener la conexión
                 serviceScope.launch {
                     delay(2000) // Dar tiempo para que el comando se procese
-                    Log.d(TAG, "Deteniendo servicio después de cambiar a modo manual")
+                    logDebug("Deteniendo servicio después de cambiar a modo manual")
                     stopSelf()
                 }
             }
@@ -426,7 +444,7 @@ class CoolerService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Control Automático del Cooler",
-                NotificationManager.IMPORTANCE_MIN  // MIN para no mostrar en barra de estado
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Monitoreo térmico y control automático del RedMagic Cooler"
                 setShowBadge(false)
@@ -528,8 +546,7 @@ class CoolerService : Service() {
             .addAction(0, "Detener", stopPendingIntent)
             .setStyle(NotificationCompat.DecoratedCustomViewStyle())
             .setCustomContentView(collapsed)
-            .setPriority(NotificationCompat.PRIORITY_MIN)  // MIN para no mostrar en status bar
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)  // Diferir mostrar en status bar
+            .setPriority(NotificationCompat.PRIORITY_LOW)
 
         return builder.build()
     }
@@ -671,7 +688,7 @@ class CoolerService : Service() {
                         // Log informativo para temperaturas elevadas
                         if (data.tempLevel == ThermalMonitor.TempLevel.HOT || 
                             data.tempLevel == ThermalMonitor.TempLevel.CRITICAL) {
-                            Log.i(TAG, "Ajuste automático: ${data.maxTemp}°C → $recommendedSpeed%")
+                            logDebug("Ajuste automático: ${data.maxTemp}°C → $recommendedSpeed%")
                         }
                     }
                 }
@@ -717,6 +734,22 @@ class CoolerService : Service() {
         }
     }
     
+    /**
+     * Limpia el perfil activo en memoria y en prefs. Es necesario al detener el
+     * modo auto o pasar a manual: si el perfil quedara en memoria, onDestroy →
+     * saveState() lo volvería a persistir y una recreación del servicio
+     * (START_STICKY) reactivaría el monitoreo térmico sin que el usuario lo pida.
+     */
+    private fun clearActiveProfileState() {
+        activeProfile = null
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit {
+            remove("ACTIVE_PROFILE_ID")
+            remove("ACTIVE_PROFILE_TYPE")
+            remove("ACTIVE_PROFILE_MAC")
+            remove("ACTIVE_PROFILE_NAME")
+        }
+    }
+
     private fun saveState() {
         try {
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -740,7 +773,7 @@ class CoolerService : Service() {
                 
                 apply()
             }
-            Log.d(TAG, "Estado guardado: temp=$currentTemp, speed=$currentSpeed, profile=${activeProfile?.displayName ?: "ninguno"}")
+            logDebug("Estado guardado: temp=$currentTemp, speed=$currentSpeed, profile=${activeProfile?.displayName ?: "ninguno"}")
         } catch (e: Exception) {
             Log.e(TAG, "Error guardando estado: ${e.message}")
         }
@@ -777,7 +810,7 @@ class CoolerService : Service() {
                 }
             }
 
-            Log.d(TAG, "Estado restaurado: temp=$currentTemp, speed=$currentSpeed, profile=${activeProfile?.displayName ?: "ninguno"}")
+            logDebug("Estado restaurado: temp=$currentTemp, speed=$currentSpeed, profile=${activeProfile?.displayName ?: "ninguno"}")
         } catch (e: Exception) {
             Log.e(TAG, "Error cargando estado: ${e.message}")
         }
@@ -810,7 +843,7 @@ class CoolerService : Service() {
             green and 0xFF,
             blue and 0xFF
         )
-        Log.d(TAG, "Comando RGB enviado: $hexColor (efecto: ${effect.name}, R:$red G:$green B:$blue)")
+        logDebug("Comando RGB enviado: $hexColor (efecto: ${effect.name}, R:$red G:$green B:$blue)")
     }
     
     // Funciones de métricas de batería
@@ -846,13 +879,13 @@ class CoolerService : Service() {
                 
                 if (durationMinutes > 0) {
                     val batteryPerHour = (batteryUsed.toFloat() / durationMinutes) * 60
-                    Log.i(TAG, "=== MÉTRICAS DE BATERÍA ===")
-                    Log.i(TAG, "Duración: ${durationMinutes}min")
-                    Log.i(TAG, "Batería inicial: $startLevel%")
-                    Log.i(TAG, "Batería final: $endLevel%")
-                    Log.i(TAG, "Batería usada: $batteryUsed%")
-                    Log.i(TAG, "Consumo estimado: ${"%.2f".format(batteryPerHour)}%/hora")
-                    Log.i(TAG, "=========================")
+                    logDebug("=== MÉTRICAS DE BATERÍA ===")
+                    logDebug("Duración: ${durationMinutes}min")
+                    logDebug("Batería inicial: $startLevel%")
+                    logDebug("Batería final: $endLevel%")
+                    logDebug("Batería usada: $batteryUsed%")
+                    logDebug("Consumo estimado: ${"%.2f".format(batteryPerHour)}%/hora")
+                    logDebug("=========================")
                 }
             }
         } catch (e: Exception) {

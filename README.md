@@ -20,7 +20,7 @@
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
   </a>
   <img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 7.0+">
-  <img src="https://img.shields.io/badge/Kotlin-2.3-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin 2.3">
+  <img src="https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin 2.4.21">
 </p>
 
 RedmagicCooler is a community-built Android client for RedMagic / Nubia magnetic coolers. It talks directly to the cooler over Bluetooth LE, so you can control the fan, enable automatic thermal regulation, and change the RGB lighting without the official app.
@@ -53,6 +53,7 @@ The app matches each cooler by its manufacturer data in the BLE scan record, wit
 | 5 | Heat Sink 5 | Supported by UUID |
 | 6 | Heat Sink 6 | Supported by UUID |
 | 6 | Heat Sink 6 Pro | Supported by UUID |
+| 6 | Heat Sink 6 Pro+ | Supported by UUID |
 
 > [!IMPORTANT]
 > Only the **Heat Sink 5 Pro** has been tested on real hardware. The other models use their advertised UUIDs but have not been verified by the maintainer. If your model behaves differently, open an issue with a Logcat capture.
@@ -165,14 +166,14 @@ Fan speed is sent as a raw value between `40` and `80`, mapped from the UI's `0â
 | `model/` | BLE constants, profiles, and RGB configuration. |
 | `ble/` | Single GATT owner and op queue. |
 
-**Stack:** Kotlin 2.4, Jetpack Compose, Material 3, Coroutines/Flow, Navigation Compose, WorkManager, and Android BLE GATT. The app targets Android 17 (API 37) and supports Android 7.0 (API 24) and newer.
+**Stack:** Kotlin 2.4.21, Jetpack Compose, Material 3, Coroutines/Flow, Navigation Compose, WorkManager, and Android BLE GATT. The app targets Android 17 (API 37) and supports Android 7.0 (API 24) and newer.
 
 ## Development
 
 Run the unit tests and build the app:
 
 ```bash
-./gradlew test
+./gradlew testDebugUnitTest
 ./gradlew assembleDebug
 ./gradlew assembleRelease
 ```
@@ -193,7 +194,7 @@ Pull requests are welcome. For BLE issues, include the cooler model, phone model
 
 Some coolers stop answering GATT service discovery after a disconnect. The BLE link is established, but the cooler does not respond to ATT requests and Android terminates the connection with `status 22` after roughly 30 seconds. The official Nubia app shows the same behavior, so this is a cooler firmware or phone Bluetooth-stack limitation rather than an app bug.
 
-**Workaround:** toggle Bluetooth off and on, then reconnect. The app retries up to three times before showing the error.
+**Workaround:** toggle Bluetooth off and on, then reconnect. The app retries up to five times before showing the error.
 
 ### The fan slider is disabled
 

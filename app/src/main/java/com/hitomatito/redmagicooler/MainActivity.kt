@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var profileRepository: ProfileRepository
     
     companion object {
-        private const val TAG = "RedMagicCooler"
+        private const val TAG = "RedmagicCooler"
         private const val KEY_NEW_PROFILE_ID = "newlyCreatedProfileId"
         private const val KEY_RGB_SHEET_PROFILE_ID = "rgbSheetProfileId"
         private const val KEY_TWO_PANE_PROFILE_ID = "selectedProfileIdForTwoPane"
@@ -905,6 +905,14 @@ class MainActivity : ComponentActivity() {
 
             if (!BlePermissionManager.hasNotificationPermission(this)) {
                 Toast.makeText(this, "Se requiere permiso de notificaciones para el modo automático", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            // El FGS de tipo connectedDevice exige permisos BLE en Android 14+.
+            // Validar antes de persistir: si startForeground() lanza SecurityException,
+            // el perfil quedaría marcado como auto=true sin servicio que lo controle.
+            if (!BlePermissionManager.hasCriticalBlePermissions(this)) {
+                Toast.makeText(this, "Se requieren permisos de Bluetooth para el modo automático", Toast.LENGTH_SHORT).show()
                 return
             }
 

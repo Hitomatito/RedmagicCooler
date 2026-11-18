@@ -179,6 +179,9 @@ object CoolerBleManager {
 
     val connectedDevice: CoolerDevice? get() = connectedCoolerDevice
     @Volatile private var discoveryTimedOutFlag = false
+    // El watchdog de discovery ya emitió Disconnected y programó la reconexión;
+    // el callback de onConnectionStateChange no debe repetirla (status 22 incluido).
+    @Volatile private var discoveryTimeoutReconnectPending = false
 
     /** Inicialización idempotente; llamar desde Application/MainActivity/CoolerService. */
     fun init(context: Context) {
@@ -208,6 +211,14 @@ object CoolerBleManager {
             }
         if (isScanning) {
             Log.w(TAG, "Escaneo ya en curso")
+            // Un reconnect externo puede llegar mientras la UI está escaneando:
+            // tomar el destino de la reconexión para que el timeout no reintente
+            // contra la MAC del escaneo manual (o de forma genérica).
+            if (isReconnectAttempt) {
+                scanIsReconnectAttempt = true
+                scanTargetMac = targetMac
+                scanTargetType = targetType
+            }
             return false
         }
         if (!BlePermissionManager.hasCriticalBlePermissions(context)) {
@@ -258,9 +269,9 @@ object CoolerBleManager {
             if (isScanning && !isConnected) {
                 Log.d(TAG, "Timeout de escaneo ($SCAN_TIMEOUT_MS ms), deteniendo")
                 stopScan()
-                // Encadena el siguiente intento tanto para escaneos con MAC como
-                // genéricos; un escaneo manual del usuario no debe reconectar solo.
-                if (scanIsReconnectAttempt || (scanTargetMac != null && scanTargetType != null)) {
+                // Solo encadena reconexiones: un escaneo manual del usuario,
+                // incluso con MAC destino, no debe reconectar por su cuenta.
+                if (scanIsReconnectAttempt) {
                     // scheduleReconnect decide por contador (o emite ConnectionFailed al agotarse)
                     scheduleReconnect()
                 }
@@ -338,6 +349,7 @@ object CoolerBleManager {
         scanIsReconnectAttempt = false
         discoveryRetryCount = 0
         discoveryTimedOutFlag = false
+        discoveryTimeoutReconnectPending = false
 
         bluetoothGatt = try {
             @Suppress("DEPRECATION")
@@ -357,6 +369,7 @@ object CoolerBleManager {
         reconnectJob = null
         reconnectAttempts = MAX_RECONNECT_ATTEMPTS // bloquea reintentos
         scanIsReconnectAttempt = false
+        discoveryTimeoutReconnectPending = false
         closeGattInternal()
         stopScan()
         _state.value = ConnectionState.DISCONNECTED
@@ -400,7 +413,12 @@ object CoolerBleManager {
         reconnectJob?.cancel()
         reconnectAttempts = 0
         reconnectBackoffMs = 2000L
-        startScan(lowLatency = false, targetMac = macAddress, targetType = deviceType)
+        startScan(
+            lowLatency = false,
+            targetMac = macAddress,
+            targetType = deviceType,
+            isReconnectAttempt = true
+        )
     }
 
     // ------------------------------------------------ escritura de comandos
@@ -539,6 +557,7 @@ object CoolerBleManager {
                 android.bluetooth.BluetoothProfile.STATE_CONNECTED -> {
                     reconnectJob?.cancel()
                     reconnectJob = null
+                    discoveryTimeoutReconnectPending = false
                     isConnected = true
                     reconnectAttempts = 0
                     reconnectBackoffMs = 2000L
@@ -557,15 +576,22 @@ object CoolerBleManager {
                 }
                 android.bluetooth.BluetoothProfile.STATE_DISCONNECTED -> {
                     val wasIntentional = status == BluetoothGatt.GATT_SUCCESS
-                    Log.d(TAG, "Desconectado (status=$status)")
+                    // El watchdog ya cerró el GATT, avisó y programó la reconexión.
+                    // Repetirlo aquí agotaba el backoff el doble de rápido y emitía un
+                    // segundo Disconnected con willReconnect=false (p. ej. status 22).
+                    val watchdogHandled = discoveryTimeoutReconnectPending
+                    discoveryTimeoutReconnectPending = false
+                    Log.d(TAG, "Desconectado (status=$status, watchdog=$watchdogHandled)")
                     clearCharacteristics()
                     isConnected = false
                     _state.value = ConnectionState.DISCONNECTED
                     bluetoothGatt = null
                     connectedCoolerDevice = null
-                    _events.tryEmit(BleEvent.Disconnected(status, willReconnect = !wasIntentional))
-                    if (!wasIntentional) {
-                        scheduleReconnect()
+                    if (!watchdogHandled) {
+                        _events.tryEmit(BleEvent.Disconnected(status, willReconnect = !wasIntentional))
+                        if (!wasIntentional) {
+                            scheduleReconnect()
+                        }
                     }
                 }
             }
@@ -673,6 +699,7 @@ object CoolerBleManager {
             delay(DISCOVERY_TIMEOUT_MS)
             if (!isConnected || fanCharacteristic != null) return@launch
             discoveryTimedOutFlag = true
+            discoveryTimeoutReconnectPending = true
             Log.w(TAG, "Timeout de discovery de servicios ($DISCOVERY_TIMEOUT_MS ms)")
             try {
                 @Suppress("DEPRECATION")

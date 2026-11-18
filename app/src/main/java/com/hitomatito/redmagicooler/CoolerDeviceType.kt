@@ -138,13 +138,27 @@ enum class CoolerDeviceType(
                 // subType 4 → Jacket4 (más probable sin evidencia de 6ª gen)
                 // subType 5 sin evidencia de "Pro" → Jacket5 Lite (más probable en G5)
                 // subType 6 → primera gen 6 (Jacket6)
-                byBoth.size > 1 -> byBoth.sortedBy { it.generation }.first()
+                byBoth.size > 1 -> preferBySubType(subType, byBoth)
                 byManufacturer.size == 1 -> byManufacturer.single()
-                byManufacturer.size > 1 -> byManufacturer.sortedBy { it.generation }.first()
+                byManufacturer.size > 1 -> preferBySubType(subType, byManufacturer)
                 byName.size == 1 -> byName.single()
                 byName.size > 1 -> byName.sortedBy { it.generation }.first()
                 else -> null
             }
+        }
+
+        /**
+         * Desempate dentro de un mismo subType cuando el nombre BLE no decide:
+         * mantiene la generación más baja, pero prefiere Jacket5 Lite para subType 5
+         * sin evidencia de "Pro", coherente con el comentario de detección.
+         */
+        private fun preferBySubType(
+            subType: Int?,
+            candidates: Collection<CoolerDeviceType>
+        ): CoolerDeviceType? {
+            if (candidates.size <= 1) return candidates.firstOrNull()
+            if (subType == 5 && JACKET_5_LITE in candidates) return JACKET_5_LITE
+            return candidates.sortedBy { it.generation }.first()
         }
     }
 
@@ -156,7 +170,6 @@ enum class CoolerDeviceType(
         if (bleName == null) return false
 
         val isRedMagicDevice = bleName.contains("Magcooler", ignoreCase = true) ||
-                               bleName.contains("MagCooler", ignoreCase = true) ||
                                bleName.contains("RM ", ignoreCase = true) ||
                                bleName.contains("RedMagic", ignoreCase = true) ||
                                bleName.contains("Red Magic", ignoreCase = true) ||

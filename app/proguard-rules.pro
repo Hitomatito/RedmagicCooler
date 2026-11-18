@@ -26,3 +26,9 @@
 # Keep line numbers so release crash reports are readable.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
+
+# El APK de release solo debe emitir errores y avisos: quita Log.d/Log.i.
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** i(...);
+}

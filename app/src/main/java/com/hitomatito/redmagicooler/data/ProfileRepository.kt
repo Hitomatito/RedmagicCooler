@@ -83,7 +83,9 @@ class ProfileRepository(context: Context) {
      */
     fun addProfile(profile: CoolerProfile): CoolerProfile {
         // Verificar si ya existe un perfil con la misma MAC
-        val existingProfile = _profiles.value.find { it.macAddress == profile.macAddress }
+        val existingProfile = _profiles.value.find {
+            it.macAddress.equals(profile.macAddress, ignoreCase = true)
+        }
         if (existingProfile != null) {
             Log.d(TAG, "Perfil con MAC ${profile.macAddress} ya existe, actualizando...")
             return updateProfile(existingProfile.copy(
@@ -135,7 +137,7 @@ class ProfileRepository(context: Context) {
      * Obtiene un perfil por dirección MAC
      */
     fun getProfileByMac(macAddress: String): CoolerProfile? {
-        return _profiles.value.find { it.macAddress == macAddress }
+        return _profiles.value.find { it.macAddress.equals(macAddress, ignoreCase = true) }
     }
     
     /**
@@ -221,7 +223,7 @@ class ProfileRepository(context: Context) {
     /** Vincula la MAC real cuando un perfil creado como copia se conecta. */
     fun updateMacAddress(profileId: String, macAddress: String) {
         val profile = getProfile(profileId) ?: return
-        if (profile.macAddress == macAddress) return
+        if (profile.macAddress.equals(macAddress, ignoreCase = true)) return
         updateProfile(profile.copy(macAddress = macAddress))
     }
     
