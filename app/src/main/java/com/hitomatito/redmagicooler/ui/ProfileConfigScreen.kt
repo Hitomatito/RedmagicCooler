@@ -1,5 +1,11 @@
 package com.hitomatito.redmagicooler.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -11,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Warning
@@ -47,6 +55,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -59,15 +68,19 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.hitomatito.redmagicooler.ThermalLogic
 import com.hitomatito.redmagicooler.ThermalMonitor
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Pantalla de configuración completa para un perfil de cooler específico
@@ -77,7 +90,9 @@ import kotlinx.coroutines.delay
 @Composable
 fun ProfileConfigScreen(
     profile: CoolerProfile,
-    thermalData: ThermalMonitor.ThermalData,
+    thermalDataFlow: StateFlow<ThermalMonitor.ThermalData>,
+    actualSpeed: Int = -1,
+    isConnecting: Boolean = false,
     onNavigateBack: () -> Unit,
     onNavigateToRGB: () -> Unit,
     onSetFanSpeed: (Int) -> Unit,
@@ -91,20 +106,54 @@ fun ProfileConfigScreen(
     onDismissError: () -> Unit = {}
 ) {
     var fanSpeed by remember(profile.fanSpeed) { mutableIntStateOf(profile.fanSpeed) }
+    var isDragging by remember { mutableStateOf(false) }
     var isApplying by remember { mutableStateOf(false) }
+    // Velocidad elegida por el usuario todavía no confirmada por el cooler.
+    // Mientras no se confirme, una lectura tardía no debe pisar el valor del slider.
+    var pendingUserSpeed by remember { mutableStateOf<Int?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf(profile.name) }
     val scrollState = rememberScrollState()
+    val reduceMotion = rememberReduceMotion()
+
+    // Reflejar la velocidad que reporta el cooler solo cuando coincide con el
+    // último valor enviado (o no hay ninguno pendiente). Las lecturas tardías
+    // con otro valor se ignoran para no pisar lo que el usuario acaba de elegir.
+    LaunchedEffect(actualSpeed) {
+        if (profile.isConnected && actualSpeed >= 0 && !isDragging) {
+            if (pendingUserSpeed == null || pendingUserSpeed == actualSpeed) {
+                pendingUserSpeed = null
+                fanSpeed = actualSpeed
+            }
+        }
+    }
+
+    // Red de seguridad: si el cooler nunca confirma (o el gesto volvió al mismo
+    // valor y no reinició el debounce), liberar el flag para no ignorar lecturas
+    // futuras indefinidamente.
+    LaunchedEffect(pendingUserSpeed) {
+        val pending = pendingUserSpeed ?: return@LaunchedEffect
+        delay(1500)
+        if (pendingUserSpeed == pending) pendingUserSpeed = null
+    }
 
     // Aplicación automática con debounce
     LaunchedEffect(fanSpeed, profile.isConnected, profile.isAutoMode) {
         if (profile.isConnected && !profile.isAutoMode) {
             isApplying = true
-            delay(500)
-            onSetFanSpeed(fanSpeed)
-            delay(300)
+            try {
+                delay(500)
+                onSetFanSpeed(fanSpeed)
+                // No liberar pendingUserSpeed aquí: debe mantenerse hasta que la
+                // lectura del cooler confirme el valor o actúe la red de seguridad.
+                delay(300)
+            } finally {
+                isApplying = false
+            }
+        } else {
             isApplying = false
+            pendingUserSpeed = null
         }
     }
 
@@ -189,7 +238,12 @@ fun ProfileConfigScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showRenameDialog = true }) {
+                    IconButton(
+                        onClick = {
+                            newName = profile.name
+                            showRenameDialog = true
+                        }
+                    ) {
                         Icon(Icons.Filled.Edit, "Renombrar")
                     }
                     IconButton(onClick = { showDeleteDialog = true }) {
@@ -223,6 +277,14 @@ fun ProfileConfigScreen(
                 )
             }
 
+            AnimatedVisibility(
+                visible = profile.isAutoMode,
+                enter = if (reduceMotion) fadeIn() else slideInVertically { -it } + fadeIn(),
+                exit = if (reduceMotion) fadeOut() else slideOutVertically { -it } + fadeOut()
+            ) {
+                AutoModeBanner(onDisable = onToggleAutoMode)
+            }
+
             // Imagen del modelo y estado de conexión
             ProfileHeroCard(
                 profile = profile,
@@ -238,11 +300,13 @@ fun ProfileConfigScreen(
                 )
             }
 
-            // Monitor térmico
+            // Monitor térmico: el flujo se lee dentro de la tarjeta para que
+            // cada lectura no recomponga el resto de la pantalla.
             ThermalCard(
-                thermalData = thermalData,
+                thermalDataFlow = thermalDataFlow,
                 isAutoMode = profile.isAutoMode,
-                isConnecting = false,
+                isConnecting = isConnecting,
+                isMacBound = profile.macAddress.isNotBlank(),
                 onToggleAutoMode = onToggleAutoMode
             )
 
@@ -252,13 +316,68 @@ fun ProfileConfigScreen(
                     fanSpeed = fanSpeed,
                     isAutoMode = profile.isAutoMode,
                     isApplying = isApplying,
-                    onSpeedChange = { fanSpeed = it },
-                    onSetSpeed = onSetFanSpeed
+                    onSpeedChange = {
+                        pendingUserSpeed = it
+                        fanSpeed = it
+                    },
+                    onSetSpeed = {
+                        pendingUserSpeed = it
+                        onSetFanSpeed(it)
+                    },
+                    onDraggingChange = { isDragging = it }
                 )
             }
 
             // Información del perfil
             ProfileInfoCard(profile = profile)
+        }
+    }
+}
+
+/**
+ * Superficie dedicada al modo automático con acceso directo para desactivarlo.
+ */
+@Composable
+private fun AutoModeBanner(
+    onDisable: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Check,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Modo automático activo",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Text(
+                    text = "El servicio ajusta la velocidad entre ${ThermalLogic.TEMP_SAFE} y " +
+                        "${ThermalLogic.TEMP_CRITICAL} °C aunque cierres la app.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            }
+            FilledTonalButton(onClick = onDisable) {
+                Text("Desactivar")
+            }
         }
     }
 }
@@ -275,9 +394,12 @@ private fun ProfileHeroCard(
     val isInAutoMode = profile.isAutoMode
     val connected = profile.isConnected
     val glowColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+    val glowColors = remember(glowColor) { listOf(glowColor, Color.Transparent) }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(),
         shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
@@ -291,7 +413,7 @@ private fun ProfileHeroCard(
                     .drawBehind {
                         drawRect(
                             brush = Brush.radialGradient(
-                                colors = listOf(glowColor, Color.Transparent),
+                                colors = glowColors,
                                 center = center,
                                 radius = size.minDimension * 0.75f
                             )
@@ -392,26 +514,29 @@ private fun RgbCard(
     } else {
         MaterialTheme.colorScheme.primary
     }
-    val previewBrush = when {
-        rgb == null -> SolidColor(previewColor)
-        rgb.effect == LightEffect.COLORFUL || rgb.effect == LightEffect.BREATH_FULLCOLOR ->
-            Brush.sweepGradient(
-                listOf(
-                    Color(0xFFE53935),
-                    Color(0xFFFB8C00),
-                    Color(0xFFFDD835),
-                    Color(0xFF43A047),
-                    Color(0xFF1E88E5),
-                    Color(0xFF8E24AA),
-                    Color(0xFFE53935)
+    val previewBrush = remember(rgb?.effect, previewColor) {
+        when {
+            rgb == null -> SolidColor(previewColor)
+            rgb.effect == LightEffect.COLORFUL || rgb.effect == LightEffect.BREATH_FULLCOLOR ->
+                Brush.sweepGradient(
+                    listOf(
+                        Color(0xFFE53935),
+                        Color(0xFFFB8C00),
+                        Color(0xFFFDD835),
+                        Color(0xFF43A047),
+                        Color(0xFF1E88E5),
+                        Color(0xFF8E24AA),
+                        Color(0xFFE53935)
+                    )
                 )
-            )
 
-        else -> SolidColor(previewColor)
+            else -> SolidColor(previewColor)
+        }
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -476,11 +601,13 @@ private fun RgbCard(
  */
 @Composable
 private fun ThermalCard(
-    thermalData: ThermalMonitor.ThermalData,
+    thermalDataFlow: StateFlow<ThermalMonitor.ThermalData>,
     isAutoMode: Boolean,
     isConnecting: Boolean,
+    isMacBound: Boolean,
     onToggleAutoMode: () -> Unit
 ) {
+    val thermalData by thermalDataFlow.collectAsState()
     val hasTemperature = thermalData.maxTemp > 0f
 
     val levelLabel = when (thermalData.tempLevel) {
@@ -511,6 +638,7 @@ private fun ThermalCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -553,9 +681,17 @@ private fun ThermalCard(
                     Switch(
                         checked = isAutoMode,
                         onCheckedChange = { onToggleAutoMode() },
-                        enabled = !isConnecting
+                        enabled = (isMacBound || isAutoMode) && !isConnecting
                     )
                 }
+            }
+
+            if (!isMacBound) {
+                Text(
+                    text = "Conecta el cooler para vincular este perfil antes de activar el modo automático",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             Row(
@@ -612,6 +748,7 @@ private fun ThermalCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
         }
     }
 }
@@ -625,10 +762,13 @@ private fun SpeedControlCard(
     isAutoMode: Boolean,
     isApplying: Boolean,
     onSpeedChange: (Int) -> Unit,
-    onSetSpeed: (Int) -> Unit
+    onSetSpeed: (Int) -> Unit,
+    onDraggingChange: (Boolean) -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -659,31 +799,32 @@ private fun SpeedControlCard(
                     )
                 }
 
-                if (isApplying && !isAutoMode) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        text = "$fanSpeed",
+                        style = MaterialTheme.typography.displaySmall,
+                        color = if (isAutoMode) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        }
                     )
-                } else {
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Text(
-                            text = "$fanSpeed",
-                            style = MaterialTheme.typography.displaySmall,
-                            color = if (isAutoMode) {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            } else {
-                                MaterialTheme.colorScheme.primary
-                            }
-                        )
-                        Text(
-                            text = "%",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = if (isAutoMode) {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            } else {
-                                MaterialTheme.colorScheme.primary
-                            },
-                            modifier = Modifier.padding(bottom = 4.dp)
+                    Text(
+                        text = "%",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = if (isAutoMode) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                    if (isApplying && !isAutoMode) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .padding(start = 8.dp, bottom = 4.dp),
+                            strokeWidth = 2.dp
                         )
                     }
                 }
@@ -691,7 +832,14 @@ private fun SpeedControlCard(
 
             Slider(
                 value = fanSpeed.toFloat(),
-                onValueChange = { onSpeedChange(it.toInt()) },
+                onValueChange = {
+                    onDraggingChange(true)
+                    onSpeedChange(it.toInt())
+                },
+                onValueChangeFinished = {
+                    onDraggingChange(false)
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                },
                 valueRange = 0f..100f,
                 enabled = !isAutoMode
             )
@@ -709,7 +857,9 @@ private fun SpeedControlCard(
                         },
                         label = { Text("$preset%") },
                         enabled = !isAutoMode,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
                     )
                 }
             }
@@ -724,6 +874,7 @@ private fun SpeedControlCard(
 private fun ProfileInfoCard(profile: CoolerProfile) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -738,7 +889,7 @@ private fun ProfileInfoCard(profile: CoolerProfile) {
                 fontWeight = FontWeight.SemiBold
             )
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
             InfoRow("Dispositivo", profile.deviceType.deviceName)
             InfoRow("Generación", "Gen ${profile.deviceType.generation}")

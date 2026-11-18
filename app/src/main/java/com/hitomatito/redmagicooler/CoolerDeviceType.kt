@@ -16,14 +16,16 @@ enum class CoolerDeviceType(
     val manufacturerSubTypes: List<Int>,
     val generation: Int,
     val description: String,
-    val imageRes: Int
+    val imageRes: Int,
+    val accentArgb: Long
 ) {
     JACKET_1(
         deviceName = "Enfriador Doble Núcleo",
         manufacturerSubTypes = listOf(1),
         generation = 1,
         description = "Primera generación de enfriadores RedMagic",
-        imageRes = R.drawable.cooler_dual_core
+        imageRes = R.drawable.cooler_dual_core,
+        accentArgb = 0xFF26A69A
     ),
 
     JACKET_2(
@@ -31,7 +33,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(2),
         generation = 2,
         description = "Segunda generación con mejoras de rendimiento",
-        imageRes = R.drawable.cooler_turbo
+        imageRes = R.drawable.cooler_turbo,
+        accentArgb = 0xFFFF7043
     ),
 
     JACKET_3(
@@ -39,7 +42,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(3),
         generation = 3,
         description = "Tercera generación con diseño optimizado",
-        imageRes = R.drawable.cooler_magcooler
+        imageRes = R.drawable.cooler_magcooler,
+        accentArgb = 0xFF7E57C2
     ),
 
     JACKET_4(
@@ -47,7 +51,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(4),
         generation = 4,
         description = "Cuarta generación profesional",
-        imageRes = R.drawable.cooler_heat_sink_4_pro
+        imageRes = R.drawable.cooler_heat_sink_4_pro,
+        accentArgb = 0xFF42A5F5
     ),
 
     // Jacket5 y Jacket5 Lite publicitan el mismo subType (5): se distinguen por nombre
@@ -56,7 +61,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(5),
         generation = 5,
         description = "Quinta generación con control RGB avanzado",
-        imageRes = R.drawable.cooler_heat_sink_5_pro
+        imageRes = R.drawable.cooler_heat_sink_5_pro,
+        accentArgb = 0xFFEC407A
     ),
 
     JACKET_5_LITE(
@@ -64,7 +70,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(5),
         generation = 5,
         description = "Quinta generación, versión estándar",
-        imageRes = R.drawable.cooler_heat_sink_5
+        imageRes = R.drawable.cooler_heat_sink_5,
+        accentArgb = 0xFFAB47BC
     ),
 
     // La app oficial publicita (5,4)|(5,6) para Jacket6
@@ -73,7 +80,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(4, 6),
         generation = 6,
         description = "Sexta generación con eficiencia mejorada",
-        imageRes = R.drawable.cooler_heat_sink_6
+        imageRes = R.drawable.cooler_heat_sink_6,
+        accentArgb = 0xFF29B6F6
     ),
 
     // Jacket6 Pro y Jacket6 Pro+ publicitan (5,5)|(5,6): se distinguen por nombre
@@ -82,7 +90,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(5, 6),
         generation = 6,
         description = "Versión profesional de sexta generación",
-        imageRes = R.drawable.cooler_heat_sink_6_pro
+        imageRes = R.drawable.cooler_heat_sink_6_pro,
+        accentArgb = 0xFF5C6BC0
     ),
 
     JACKET_6_PRO_PLUS(
@@ -90,7 +99,8 @@ enum class CoolerDeviceType(
         manufacturerSubTypes = listOf(5, 6),
         generation = 6,
         description = "Versión profesional plus de sexta generación",
-        imageRes = R.drawable.cooler_heat_sink_6_pro_plus
+        imageRes = R.drawable.cooler_heat_sink_6_pro_plus,
+        accentArgb = 0xFFFFA726
     );
 
     companion object {

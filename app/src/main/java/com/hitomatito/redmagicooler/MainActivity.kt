@@ -4,7 +4,9 @@ import android.app.ActivityManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -12,18 +14,41 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
+import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
+import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.hitomatito.redmagicooler.ble.CoolerBleManager
+import com.hitomatito.redmagicooler.data.AppPreferences
 import com.hitomatito.redmagicooler.data.ProfileRepository
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
@@ -31,18 +56,19 @@ import com.hitomatito.redmagicooler.model.RGBConfig
 import com.hitomatito.redmagicooler.ui.AddDeviceScreen
 import com.hitomatito.redmagicooler.ui.BluetoothRequiredScreen
 import com.hitomatito.redmagicooler.ui.HomeScreen
+import com.hitomatito.redmagicooler.ui.OnboardingScreen
 import com.hitomatito.redmagicooler.ui.ProfileConfigScreen
-import com.hitomatito.redmagicooler.ui.RGBControlScreen
+import com.hitomatito.redmagicooler.ui.RGBControlSheet
 import com.hitomatito.redmagicooler.ui.theme.RedmagiCoolerTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3WindowSizeClassApi::class)
 @Suppress("OVERRIDE_DEPRECATION")
 class MainActivity : ComponentActivity() {
     private lateinit var bluetoothAdapter: BluetoothAdapter
@@ -56,7 +82,8 @@ class MainActivity : ComponentActivity() {
     private var isConnecting by mutableStateOf(false)
     private var statusMessage by mutableStateOf("Listo")
     private var connectionError by mutableStateOf<String?>(null)
-    private var currentCoolerSpeed by mutableIntStateOf(50)
+    // -1 = sin lectura real (coincide con CoolerBleManager.fanSpeedPercent)
+    private var currentCoolerSpeed by mutableIntStateOf(-1)
     
     // Perfil actualmente conectado
     private var currentConnectedProfileId by mutableStateOf<String?>(null)
@@ -70,21 +97,28 @@ class MainActivity : ComponentActivity() {
 
     // Perfil recién creado (para navegación automática)
     private var newlyCreatedProfileId by mutableStateOf<String?>(null)
+
+    // Perfil cuya iluminación RGB se está editando en la hoja modal
+    private var rgbSheetProfileId by mutableStateOf<String?>(null)
+
+    // Panel de detalle en pantallas grandes (two-pane)
+    private var selectedProfileIdForTwoPane by mutableStateOf<String?>(null)
     
-    // Estado térmico compartido por esta UI y CoolerService
+    // Ámbito de corrutinas de la UI, cancelado al destruir la Activity
     private val monitoringScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var thermalDataCollectionJob: Job? = null
-    private var isAutoMode by mutableStateOf(false)
-    private var thermalData by mutableStateOf(ThermalMonitor.ThermalData())
     
-    // Control de Bluetooth
+    // Control de Bluetooth y onboarding
     private var showBluetoothRequired by mutableStateOf(false)
+    private var showOnboarding by mutableStateOf(false)
     
     // Repositorio de perfiles
     private lateinit var profileRepository: ProfileRepository
     
     companion object {
         private const val TAG = "RedMagicCooler"
+        private const val KEY_NEW_PROFILE_ID = "newlyCreatedProfileId"
+        private const val KEY_RGB_SHEET_PROFILE_ID = "rgbSheetProfileId"
+        private const val KEY_TWO_PANE_PROFILE_ID = "selectedProfileIdForTwoPane"
     }
 
     private fun isServiceRunning(serviceClass: Class<*>): Boolean {
@@ -159,6 +193,35 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Solicita los permisos de arranque una vez que el usuario entendió para qué
+     * se usan (o cuando el onboarding ya se completó en sesiones anteriores).
+     */
+    private fun requestStartupPermissions() {
+        BlePermissionManager.requestPermissions(this) { result ->
+            if (result.granted) {
+                Log.d(TAG, "Todos los permisos concedidos")
+                statusMessage = "Listo para buscar dispositivos"
+            } else {
+                Log.e(TAG, "Permisos DENEGADOS: ${result.denied}")
+                statusMessage = "Permisos denegados"
+                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun openAppSettings() {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "No se pudieron abrir los ajustes: ${e.message}")
+            Toast.makeText(this, "No se pudieron abrir los ajustes", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
      * Manejo unificado de SecurityException: el permiso BLUETOOTH_CONNECT se
      * revocó mientras la app estaba en uso.
      */
@@ -181,12 +244,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.S)
     override fun onCreate(savedInstanceState: Bundle?) {
         // El tema Splash solo se usa durante el arranque; después pasamos al tema normal.
         setTheme(R.style.Theme_RedmagiCooler)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // La navegación automática al perfil recién creado es un evento one-shot;
+        // conservarla evita perderla si la Activity se recrea en esos 100 ms.
+        newlyCreatedProfileId = savedInstanceState?.getString(KEY_NEW_PROFILE_ID)
+        rgbSheetProfileId = savedInstanceState?.getString(KEY_RGB_SHEET_PROFILE_ID)
+        selectedProfileIdForTwoPane = savedInstanceState?.getString(KEY_TWO_PANE_PROFILE_ID)
 
         // Inicializar repositorio de perfiles
         profileRepository = ProfileRepository.getInstance(this)
@@ -206,38 +274,130 @@ class MainActivity : ComponentActivity() {
         bluetoothAdapter = bluetoothManager.adapter
         showBluetoothRequired = !bluetoothAdapter.isEnabled
         
-        // Solicitar permisos al inicio (centralizado en BlePermissionManager)
-        BlePermissionManager.requestPermissions(this) { result ->
-            if (result.granted) {
-                Log.d(TAG, "Todos los permisos concedidos")
-                statusMessage = "Listo para buscar dispositivos"
-            } else {
-                Log.e(TAG, "Permisos DENEGADOS: ${result.denied}")
-                statusMessage = "Permisos denegados"
-                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
-            }
+        // El onboarding explica los permisos antes de que aparezca el diálogo del sistema.
+        showOnboarding = !AppPreferences.isOnboardingDone(this)
+        if (!showOnboarding) {
+            requestStartupPermissions()
         }
         
-        // Inicializar monitor térmico único y alimentar la UI desde él
-        ThermalMonitorManager.initialize(this)
-        thermalDataCollectionJob?.cancel()
-        thermalDataCollectionJob = monitoringScope.launch {
-            ThermalMonitorManager.thermalData.collect { data -> thermalData = data }
-        }
+        // El monitor térmico lo inicializa CoolerService solo cuando el modo
+        // automático está activo; la UI no mantiene sensores encendidos.
 
         // Motor BLE: propietario único de la conexión (compartido con CoolerService)
         CoolerBleManager.init(this)
+
+        // El evento Connected es one-shot: si la Activity se recrea mientras el motor
+        // ya está conectado, el evento se pierde. Restauramos el perfil desde la
+        // fuente de verdad (dirección conectada + estado persistido del repositorio).
+        if (CoolerBleManager.state.value == CoolerBleManager.ConnectionState.CONNECTED) {
+            currentConnectedProfileId = CoolerBleManager.currentConnectedAddress()
+                ?.let { profileRepository.getProfileByMac(it)?.id }
+                ?: profileRepository.profiles.value.firstOrNull { it.isConnected }?.id
+        }
+
         observeBleEvents()
 
         setContent {
             RedmagiCoolerTheme {
                 val navController = rememberNavController()
                 val profiles by profileRepository.profiles.collectAsState()
-                
+                val windowSizeClass = calculateWindowSizeClass(this@MainActivity)
+                val isExpanded = windowSizeClass.widthSizeClass == WindowWidthSizeClass.Expanded
+                val twoPaneProfile = profiles.find { it.id == selectedProfileIdForTwoPane }
+
+                val renderProfile: @Composable (CoolerProfile, Modifier, () -> Unit) -> Unit =
+                    { profile, paneModifier, onBack ->
+                        ProfileConfigScreen(
+                            modifier = paneModifier,
+                            profile = profile,
+                            thermalDataFlow = ThermalMonitorManager.thermalData,
+                            actualSpeed = currentCoolerSpeed,
+                            isConnecting = isConnecting,
+                            onNavigateBack = onBack,
+                            onNavigateToRGB = { rgbSheetProfileId = profile.id },
+                            onSetFanSpeed = { speed ->
+                                setFanSpeed(speed)
+                                profileRepository.updateFanSpeed(profile.id, speed)
+                            },
+                            onToggleAutoMode = { toggleAutoMode(profile.id) },
+                            onConnect = { connectToProfile(profile) },
+                            onDisconnect = { disconnectFromCooler() },
+                            onDeleteProfile = {
+                                if (currentConnectedProfileId == profile.id) {
+                                    disconnectFromCooler()
+                                }
+                                profileRepository.deleteProfile(profile.id)
+                                selectedProfileIdForTwoPane = null
+                                onBack()
+                            },
+                            onRenameProfile = { newName ->
+                                profileRepository.renameProfile(profile.id, newName)
+                            },
+                            connectionError = connectionError,
+                            onDismissError = { connectionError = null }
+                        )
+                    }
+
+                val renderHome: @Composable ((CoolerProfile) -> Unit, Modifier) -> Unit =
+                    { onProfileClick, homeModifier ->
+                        HomeScreen(
+                            modifier = homeModifier,
+                            profiles = profiles,
+                            connectionError = connectionError,
+                            onDismissError = { connectionError = null },
+                            onProfileClick = onProfileClick,
+                            onAddDevice = {
+                                newlyCreatedProfileId = null
+                                navController.navigate("addDevice")
+                            },
+                            onDuplicateProfile = { profile ->
+                                profileRepository.duplicateProfile(profile.id)
+                            },
+                            onMoveProfile = { profileId, delta ->
+                                profileRepository.moveProfile(profileId, delta)
+                            }
+                        )
+                    }
+
+                // startDestination debe ser constante: si se recalcula al cambiar
+                // Bluetooth, NavHost reconstruye el grafo y pierde la pila de navegación.
+                val currentBackStackEntry by navController.currentBackStackEntryAsState()
+                LaunchedEffect(
+                    showOnboarding,
+                    showBluetoothRequired,
+                    currentBackStackEntry?.destination?.route
+                ) {
+                    val route = currentBackStackEntry?.destination?.route
+                    when {
+                        showOnboarding && route != "onboarding" ->
+                            navController.navigate("onboarding") { launchSingleTop = true }
+
+                        !showOnboarding && route == "onboarding" ->
+                            navController.popBackStack("onboarding", inclusive = true)
+
+                        !showOnboarding && showBluetoothRequired && route != "bluetooth" ->
+                            navController.navigate("bluetooth") { launchSingleTop = true }
+
+                        !showBluetoothRequired && route == "bluetooth" ->
+                            navController.popBackStack("bluetooth", inclusive = true)
+                    }
+                }
+
                 NavHost(
                     navController = navController,
-                    startDestination = if (showBluetoothRequired) "bluetooth" else "home"
+                    startDestination = "home"
                 ) {
+                    composable("onboarding") {
+                        OnboardingScreen(
+                            onFinish = {
+                                AppPreferences.setOnboardingDone(this@MainActivity)
+                                showOnboarding = false
+                                requestStartupPermissions()
+                            },
+                            onOpenSettings = { openAppSettings() }
+                        )
+                    }
+
                     // Pantalla de activar Bluetooth
                     composable("bluetooth") {
                         BluetoothRequiredScreen(
@@ -248,23 +408,59 @@ class MainActivity : ComponentActivity() {
                     
                     // Pantalla principal - Lista de perfiles
                     composable("home") {
-                        HomeScreen(
-                            profiles = profiles,
-                            connectionError = connectionError,
-                            onDismissError = { connectionError = null },
-                            onProfileClick = { profile ->
-                                navController.navigate("profile/${profile.id}")
-                            },
-                            onAddDevice = {
-                                navController.navigate("addDevice")
+                        if (isExpanded) {
+                            Row(modifier = Modifier.fillMaxSize()) {
+                                renderHome(
+                                    { selectedProfileIdForTwoPane = it.id },
+                                    Modifier.weight(0.4f)
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .weight(0.6f)
+                                        .fillMaxSize()
+                                ) {
+                                    if (twoPaneProfile != null) {
+                                        renderProfile(
+                                            twoPaneProfile,
+                                            Modifier.fillMaxSize()
+                                        ) { selectedProfileIdForTwoPane = null }
+                                    } else {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .padding(32.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            Text(
+                                                text = "Selecciona un cooler para ver su configuración",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
                             }
-                        )
+                        } else {
+                            renderHome(
+                                { profile ->
+                                    navController.navigate("profile/${profile.id}")
+                                },
+                                Modifier.fillMaxSize()
+                            )
+                        }
                     }
                     
                     // Pantalla para agregar nuevo dispositivo
                     composable("addDevice") {
                         AddDeviceScreen(
-                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateBack = {
+                                // Salir con Back debe cancelar la búsqueda; si no, la
+                                // conexión tardía podía dejar un id pendiente sin consumir.
+                                if (isScanning || manualScanInFlight) cancelScan()
+                                newlyCreatedProfileId = null
+                                navController.popBackStack()
+                            },
                             onDeviceTypeSelected = { deviceType ->
                                 // Iniciar búsqueda para este tipo
                                 Log.d(TAG, "Usuario selecciono dispositivo: ${deviceType.deviceName}")
@@ -299,66 +495,62 @@ class MainActivity : ComponentActivity() {
                         val currentProfile = profiles.find { it.id == profileId }
                         
                         if (currentProfile != null) {
-                            ProfileConfigScreen(
-                                profile = currentProfile,
-                                thermalData = thermalData,
-                                onNavigateBack = { navController.popBackStack() },
-                                onNavigateToRGB = { navController.navigate("rgb/$profileId") },
-                                onSetFanSpeed = { speed -> 
-                                    setFanSpeed(speed)
-                                    profileRepository.updateFanSpeed(profileId, speed)
-                                },
-                                onToggleAutoMode = { toggleAutoMode(profileId) },
-                                onConnect = { connectToProfile(currentProfile) },
-                                onDisconnect = { disconnectFromCooler() },
-                                onDeleteProfile = { 
-                                    if (currentConnectedProfileId == profileId) {
-                                        disconnectFromCooler()
-                                    }
-                                    profileRepository.deleteProfile(profileId)
-                                    navController.popBackStack()
-                                },
-                                onRenameProfile = { newName ->
-                                    profileRepository.renameProfile(profileId, newName)
-                                },
-                                connectionError = connectionError,
-                                onDismissError = { connectionError = null }
-                            )
+                            renderProfile(
+                                currentProfile,
+                                Modifier.fillMaxSize()
+                            ) { navController.popBackStack() }
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = "Perfil no encontrado",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(onClick = { navController.popBackStack() }) {
+                                    Text("Volver")
+                                }
+                            }
                         }
                     }
-                    
-                    // Pantalla de control RGB
-                    composable(
-                        route = "rgb/{profileId}",
-                        arguments = listOf(navArgument("profileId") { type = NavType.StringType })
-                    ) { backStackEntry ->
-                        val profileId = backStackEntry.arguments?.getString("profileId") ?: return@composable
-                        val rgbProfile = profiles.find { it.id == profileId }
+                }
 
-                        RGBControlScreen(
-                            isConnected = isConnected && currentConnectedProfileId == profileId,
-                            isAutoMode = isAutoMode,
-                            rgbConfig = rgbProfile?.rgbConfig,
-                            onNavigateBack = { navController.popBackStack() },
-                            onSetColorful = { 
+                val sheetProfileId = rgbSheetProfileId
+                val sheetProfile = profiles.find { it.id == sheetProfileId }
+                if (sheetProfileId != null) {
+                    ModalBottomSheet(
+                        onDismissRequest = { rgbSheetProfileId = null },
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    ) {
+                        RGBControlSheet(
+                            isConnected = isConnected && currentConnectedProfileId == sheetProfileId,
+                            isAutoMode = sheetProfile?.isAutoMode ?: false,
+                            rgbConfig = sheetProfile?.rgbConfig,
+                            onDismiss = { rgbSheetProfileId = null },
+                            onSetColorful = {
                                 setColorful()
-                                profileRepository.updateRGBConfig(profileId, RGBConfig(LightEffect.COLORFUL, 0, 0, 0))
+                                profileRepository.updateRGBConfig(sheetProfileId, RGBConfig(LightEffect.COLORFUL, 0, 0, 0))
                             },
-                            onSetBreathFullColor = { 
+                            onSetBreathFullColor = {
                                 setBreathFullColor()
-                                profileRepository.updateRGBConfig(profileId, RGBConfig(LightEffect.BREATH_FULLCOLOR, 0, 0, 0))
+                                profileRepository.updateRGBConfig(sheetProfileId, RGBConfig(LightEffect.BREATH_FULLCOLOR, 0, 0, 0))
                             },
-                            onSetBreathSingleColor = { r, g, b -> 
+                            onSetBreathSingleColor = { r, g, b ->
                                 setBreathSingleColor(r, g, b)
-                                profileRepository.updateRGBConfig(profileId, RGBConfig(LightEffect.BREATH_SINGLE, r, g, b))
+                                profileRepository.updateRGBConfig(sheetProfileId, RGBConfig(LightEffect.BREATH_SINGLE, r, g, b))
                             },
-                            onSetAlwaysBright = { r, g, b -> 
+                            onSetAlwaysBright = { r, g, b ->
                                 setAlwaysBright(r, g, b)
-                                profileRepository.updateRGBConfig(profileId, RGBConfig(LightEffect.ALWAYS_BRIGHT, r, g, b))
+                                profileRepository.updateRGBConfig(sheetProfileId, RGBConfig(LightEffect.ALWAYS_BRIGHT, r, g, b))
                             },
-                            onTurnOffLight = { 
+                            onTurnOffLight = {
                                 turnOffLight()
-                                profileRepository.updateRGBConfig(profileId, null)
+                                profileRepository.updateRGBConfig(sheetProfileId, null)
                             }
                         )
                     }
@@ -367,10 +559,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Conecta a un perfil existente
-     */
-    @RequiresApi(Build.VERSION_CODES.S)
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(KEY_NEW_PROFILE_ID, newlyCreatedProfileId)
+        outState.putString(KEY_RGB_SHEET_PROFILE_ID, rgbSheetProfileId)
+        outState.putString(KEY_TWO_PANE_PROFILE_ID, selectedProfileIdForTwoPane)
+    }
+
     /**
      * Traduce los eventos del motor BLE al estado de la UI.
      */
@@ -405,7 +600,7 @@ class MainActivity : ComponentActivity() {
                     is CoolerBleManager.BleEvent.Disconnected -> {
                         Log.d(TAG, "Cooler desconectado (status=${event.status})")
                         statusMessage = "Desconectado"
-                        currentCoolerSpeed = 0
+                        currentCoolerSpeed = -1
                         currentConnectedProfileId?.let { pid ->
                             profileRepository.updateConnectionState(pid, false)
                         }
@@ -431,6 +626,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Conecta a un perfil existente.
+     */
     private fun connectToProfile(profile: CoolerProfile) {
         if (!bluetoothAdapter.isEnabled) {
             statusMessage = "Bluetooth desactivado"
@@ -632,8 +830,9 @@ class MainActivity : ComponentActivity() {
             Log.d(TAG, "Nuevo perfil creado: ${createdProfile.displayName}")
             Toast.makeText(this, "Perfil creado: ${createdProfile.displayName}", Toast.LENGTH_SHORT).show()
         } else {
-            // Conexión a perfil existente por ID
+            // Conexión a perfil existente por ID (incluye copias todavía sin vincular)
             currentConnectedProfileId = pendingConnectionProfileId
+            profileRepository.updateMacAddress(pendingConnectionProfileId!!, mac)
             profileRepository.updateConnectionState(pendingConnectionProfileId!!, true, pendingDeviceRssi)
         }
         
@@ -651,9 +850,12 @@ class MainActivity : ComponentActivity() {
             Log.w(TAG, "setFanSpeed: no conectado")
             return
         }
-        if (CoolerBleManager.setFanSpeed(speed)) {
-            currentCoolerSpeed = speed.coerceIn(0, 100)
-        }
+        val target = speed.coerceIn(0, 100)
+        // currentCoolerSpeed solo se actualiza con la lectura confirmada por el
+        // cooler (fanSpeedPercent). Así, si una escritura falla, un reintento del
+        // mismo valor no se descarta por el guard.
+        if (currentCoolerSpeed >= 0 && target == currentCoolerSpeed) return
+        CoolerBleManager.setFanSpeed(target)
     }
 
     override fun onDestroy() {
@@ -663,14 +865,18 @@ class MainActivity : ComponentActivity() {
         try {
             monitoringScope.cancel()
             
-            CoolerBleManager.stopScan()
-            
-            // Si el servicio no está activo, liberar la conexión para ahorrar batería.
-            // Si está activo (modo automático), el GATT compartido se mantiene.
-            if (!isServiceRunning(CoolerService::class.java)) {
-                CoolerBleManager.disconnect()
+            // El motor BLE es process-wide: en una rotación la Activity se recrea,
+            // así que cortar el GATT aquí desconectaría al usuario sin querer.
+            if (!isChangingConfigurations) {
+                CoolerBleManager.stopScan()
+
+                // Si el servicio no está activo, liberar la conexión para ahorrar batería.
+                // Si está activo (modo automático), el GATT compartido se mantiene.
+                if (!isServiceRunning(CoolerService::class.java)) {
+                    CoolerBleManager.disconnect()
+                }
             }
-            
+
             Log.d(TAG, "Recursos BLE liberados correctamente")
         } catch (e: Exception) {
             Log.e(TAG, "Error liberando recursos: ${e.message}", e)
@@ -678,24 +884,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleAutoMode(profileId: String) {
-        isAutoMode = !isAutoMode
-        profileRepository.updateAutoMode(profileId, isAutoMode)
-        
-        if (isAutoMode) {
-            if (!BlePermissionManager.hasNotificationPermission(this)) {
-                Toast.makeText(this, "Se requiere permiso de notificaciones para el modo automático", Toast.LENGTH_SHORT).show()
-                isAutoMode = false
-                return
-            }
-            
-            val profile = profileRepository.getProfile(profileId)
-            
+        val profile = profileRepository.getProfile(profileId)
+        val enable = profile?.isAutoMode != true
+
+        if (enable) {
             if (profile == null) {
                 Log.e(TAG, "No se encontró perfil con ID: $profileId")
                 Toast.makeText(this, "Error: Perfil no encontrado", Toast.LENGTH_SHORT).show()
-                isAutoMode = false
                 return
             }
+
+            if (profile.macAddress.isBlank()) {
+                Toast.makeText(
+                    this,
+                    "Conecta el cooler para vincular este perfil antes de activar el modo automático",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+
+            if (!BlePermissionManager.hasNotificationPermission(this)) {
+                Toast.makeText(this, "Se requiere permiso de notificaciones para el modo automático", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            // Validar antes de persistir: escribir primero dejaba repo=true / UI=false
+            // de forma permanente si el permiso o el perfil faltaban.
+            profileRepository.updateAutoMode(profileId, true)
             
             // Iniciar servicio en segundo plano con información completa del perfil
             val serviceIntent = Intent(this, CoolerService::class.java).apply {
@@ -727,6 +942,7 @@ class MainActivity : ComponentActivity() {
             
         } else {
             // Desactivar modo automático
+            profileRepository.updateAutoMode(profileId, false)
             if (isServiceRunning(CoolerService::class.java)) {
                 // En lugar de detener el servicio completamente, cambiar a modo manual
                 // Esto mantiene la conexión activa y solo desactiva el ajuste automático

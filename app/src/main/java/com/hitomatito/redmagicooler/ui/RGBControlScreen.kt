@@ -3,6 +3,7 @@ package com.hitomatito.redmagicooler.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,52 +18,53 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.model.LightEffect
 import com.hitomatito.redmagicooler.model.RGBConfig
 
 /**
- * Pantalla de control de la iluminación RGB del cooler.
+ * Contenido de la hoja modal de control de la iluminación RGB del cooler.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RGBControlScreen(
+fun RGBControlSheet(
     isConnected: Boolean,
+    onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     isAutoMode: Boolean = false,
     rgbConfig: RGBConfig? = null,
-    onNavigateBack: () -> Unit,
     onSetColorful: () -> Unit,
     onSetBreathFullColor: () -> Unit,
     onSetBreathSingleColor: (Int, Int, Int) -> Unit,
@@ -78,62 +80,69 @@ fun RGBControlScreen(
             (it.red + it.green + it.blue > 0)
     }
 
-    var redValue by remember { mutableIntStateOf(initialColor?.red ?: 255) }
-    var greenValue by remember { mutableIntStateOf(initialColor?.green ?: 0) }
-    var blueValue by remember { mutableIntStateOf(initialColor?.blue ?: 0) }
-    var selectedEffect by remember { mutableStateOf(rgbConfig?.effect?.toEffectKey()) }
+    var redValue by rememberSaveable { mutableIntStateOf(initialColor?.red ?: 255) }
+    var greenValue by rememberSaveable { mutableIntStateOf(initialColor?.green ?: 0) }
+    var blueValue by rememberSaveable { mutableIntStateOf(initialColor?.blue ?: 0) }
+    // "off" es un estado válido y debe sobrevivir a la rotación aunque el perfil
+    // no guarde configuración RGB.
+    var selectedEffect by rememberSaveable {
+        mutableStateOf(rgbConfig?.effect?.toEffectKey() ?: "off")
+    }
 
     val scrollState = rememberScrollState()
     val currentColor = Color(redValue, greenValue, blueValue)
     val requiresColor = selectedEffect == "singleBreathing" || selectedEffect == "fixed"
+    val rainbowSwatch = remember { rainbowBrush() }
+    val multiSwatch = remember { multiColorBrush() }
 
-    val applyColor: () -> Unit = {
-        when (selectedEffect) {
-            "singleBreathing" -> onSetBreathSingleColor(redValue, greenValue, blueValue)
-            "fixed" -> onSetAlwaysBright(redValue, greenValue, blueValue)
+    val applyColor = remember(
+        selectedEffect,
+        redValue,
+        greenValue,
+        blueValue,
+        onSetBreathSingleColor,
+        onSetAlwaysBright
+    ) {
+        {
+            when (selectedEffect) {
+                "singleBreathing" -> onSetBreathSingleColor(redValue, greenValue, blueValue)
+                "fixed" -> onSetAlwaysBright(redValue, greenValue, blueValue)
+            }
         }
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "Iluminación RGB",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = if (isEffectivelyConnected) "Elige un efecto y su color" else "Conecta el cooler para controlar la luz",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface
-                )
-            )
-        }
-    ) { paddingValues ->
-        Column(
-            modifier = modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(scrollState)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(scrollState)
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "Iluminación RGB",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = if (isEffectivelyConnected) "Elige un efecto y su color" else "Conecta el cooler para controlar la luz",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Filled.Close, contentDescription = "Cerrar iluminación RGB")
+            }
+        }
+
             if (!isEffectivelyConnected) {
                 Card(
+                    shape = MaterialTheme.shapes.large,
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer
                     )
@@ -163,7 +172,8 @@ fun RGBControlScreen(
             PreviewCard(
                 effectKey = selectedEffect,
                 color = currentColor,
-                connected = isEffectivelyConnected
+                rainbowSwatch = rainbowSwatch,
+                multiSwatch = multiSwatch
             )
 
             Text(
@@ -176,7 +186,7 @@ fun RGBControlScreen(
                 EffectCard(
                     title = "Arcoíris",
                     subtitle = "Ciclo automático",
-                    swatch = rainbowBrush(),
+                    swatch = rainbowSwatch,
                     selected = selectedEffect == "rainbow",
                     enabled = isEffectivelyConnected,
                     modifier = Modifier.weight(1f),
@@ -188,7 +198,7 @@ fun RGBControlScreen(
                 EffectCard(
                     title = "Multicolor",
                     subtitle = "Respiración",
-                    swatch = multiColorBrush(),
+                    swatch = multiSwatch,
                     selected = selectedEffect == "multiBreathing",
                     enabled = isEffectivelyConnected,
                     modifier = Modifier.weight(1f),
@@ -266,7 +276,6 @@ fun RGBControlScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
         }
-    }
 }
 
 /**
@@ -276,18 +285,24 @@ fun RGBControlScreen(
 private fun PreviewCard(
     effectKey: String?,
     color: Color,
-    connected: Boolean
+    rainbowSwatch: Brush,
+    multiSwatch: Brush
 ) {
-    val brush = when (effectKey) {
-        "rainbow" -> rainbowBrush()
-        "multiBreathing" -> multiColorBrush()
-        "singleBreathing", "fixed" -> SolidColor(color)
-        "off" -> SolidColor(Color(0xFF101014))
-        else -> SolidColor(MaterialTheme.colorScheme.surfaceContainerHighest)
+    val offColor = MaterialTheme.colorScheme.inverseSurface
+    val fallbackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+    val brush = remember(effectKey, color, rainbowSwatch, multiSwatch, offColor, fallbackColor) {
+        when (effectKey) {
+            "rainbow" -> rainbowSwatch
+            "multiBreathing" -> multiSwatch
+            "singleBreathing", "fixed" -> SolidColor(color)
+            "off" -> SolidColor(offColor)
+            else -> SolidColor(fallbackColor)
+        }
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -362,8 +377,11 @@ private fun EffectCard(
 
     Card(
         modifier = modifier
-            .clip(shape)
-            .clickable(enabled = enabled, onClick = onClick)
+            .selectable(
+                selected = selected,
+                enabled = enabled,
+                onClick = onClick
+            )
             .then(
                 if (selected) {
                     Modifier.border(2.dp, MaterialTheme.colorScheme.primary, shape)
@@ -398,12 +416,12 @@ private fun EffectCard(
                         .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
                 )
                 if (selected) {
-                    Icon(
-                        imageVector = Icons.Filled.Check,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
-                    )
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Seleccionado",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
                 }
             }
 
@@ -413,11 +431,11 @@ private fun EffectCard(
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                color = if (enabled) {
-                    MaterialTheme.colorScheme.onSurface
-                } else {
-                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                }
+                    color = if (enabled) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
             )
             Text(
                 text = subtitle,
@@ -444,8 +462,11 @@ private fun OffEffectCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(shape)
-            .clickable(enabled = enabled, onClick = onClick)
+            .selectable(
+                selected = selected,
+                enabled = enabled,
+                onClick = onClick
+            )
             .then(
                 if (selected) {
                     Modifier.border(2.dp, MaterialTheme.colorScheme.primary, shape)
@@ -474,7 +495,7 @@ private fun OffEffectCard(
                 modifier = Modifier
                     .size(28.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF1B1B1F))
+                    .background(MaterialTheme.colorScheme.inverseSurface)
                     .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
             )
 
@@ -489,7 +510,7 @@ private fun OffEffectCard(
                     color = if (enabled) {
                         MaterialTheme.colorScheme.onSurface
                     } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
                 Text(
@@ -502,7 +523,7 @@ private fun OffEffectCard(
             if (selected) {
                 Icon(
                     imageVector = Icons.Filled.Check,
-                    contentDescription = null,
+                    contentDescription = "Seleccionado",
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(18.dp)
                 )
@@ -528,6 +549,7 @@ private fun ColorSection(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         )
@@ -607,20 +629,30 @@ private fun ColorSection(
                     val selected = preset.red == red && preset.green == green && preset.blue == blue
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(preset.color)
-                            .border(
-                                width = if (selected) 3.dp else 1.dp,
-                                color = if (selected) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.outlineVariant
-                                },
-                                shape = CircleShape
-                            )
+                            .size(48.dp)
                             .clickable(enabled = enabled) { onPresetSelected(preset) }
-                    )
+                            .semantics {
+                                contentDescription = preset.label
+                                this.selected = selected
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(preset.color)
+                                .border(
+                                    width = if (selected) 3.dp else 1.dp,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    },
+                                    shape = CircleShape
+                                )
+                        )
+                    }
                 }
             }
 
@@ -643,6 +675,7 @@ private fun ColorSlider(
     enabled: Boolean,
     onValueChange: (Int) -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     Column {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -660,7 +693,10 @@ private fun ColorSlider(
         }
         Slider(
             value = value.toFloat(),
-            onValueChange = { onValueChange(it.toInt()) },
+            onValueChange = {
+                onValueChange(it.toInt())
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            },
             valueRange = 0f..255f,
             enabled = enabled,
             colors = SliderDefaults.colors(
@@ -722,17 +758,17 @@ private fun LightEffect.toEffectKey(): String = when (this) {
 private enum class ColorPreset(
     val red: Int,
     val green: Int,
-    val blue: Int
+    val blue: Int,
+    val label: String
 ) {
-    RED(255, 0, 0),
-    ORANGE(255, 140, 0),
-    YELLOW(255, 235, 59),
-    GREEN(0, 200, 83),
-    CYAN(0, 188, 212),
-    BLUE(41, 98, 255),
-    PURPLE(156, 39, 176),
-    WHITE(255, 255, 255);
+    RED(255, 0, 0, "Rojo"),
+    ORANGE(255, 140, 0, "Naranja"),
+    YELLOW(255, 235, 59, "Amarillo"),
+    GREEN(0, 200, 83, "Verde"),
+    CYAN(0, 188, 212, "Cian"),
+    BLUE(41, 98, 255, "Azul"),
+    PURPLE(156, 39, 176, "Morado"),
+    WHITE(255, 255, 255, "Blanco");
 
-    val color: Color
-        get() = Color(red, green, blue)
+    val color: Color = Color(red, green, blue)
 }

@@ -1,6 +1,7 @@
 package com.hitomatito.redmagicooler.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -24,10 +25,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -35,7 +34,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -47,10 +45,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hitomatito.redmagicooler.CoolerDeviceType
+import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -74,12 +72,21 @@ fun AddDeviceScreen(
     // Detectar cuando se crea un perfil nuevo y navegar automáticamente
     LaunchedEffect(newlyCreatedProfileId) {
         newlyCreatedProfileId?.let { profileId ->
-            kotlinx.coroutines.delay(100.milliseconds)
+            delay(100.milliseconds)
             onProfileCreated(profileId)
         }
     }
 
+    // Igual que en HomeScreen: el aviso se retira solo para no tapar la lista.
+    LaunchedEffect(connectionError) {
+        if (connectionError != null) {
+            delay(8000.milliseconds)
+            onDismissError()
+        }
+    }
+
     val busy = isScanning || isConnecting
+    val reduceMotion = rememberReduceMotion()
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -119,8 +126,8 @@ fun AddDeviceScreen(
         ) {
             AnimatedVisibility(
                 visible = connectionError != null,
-                enter = slideInVertically { -it } + fadeIn(),
-                exit = slideOutVertically { -it } + fadeOut()
+                enter = if (reduceMotion) fadeIn() else slideInVertically { -it } + fadeIn(),
+                exit = if (reduceMotion) fadeOut() else slideOutVertically { -it } + fadeOut()
             ) {
                 ErrorBanner(
                     message = connectionError ?: "",
@@ -187,44 +194,12 @@ private fun ScanningStateCard(
     onCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(40.dp),
-                strokeWidth = 3.dp,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-
-            Text(
-                text = if (isScanning) "Buscando tu cooler…" else "Conectando…",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-
-            Text(
-                text = statusMessage,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                textAlign = TextAlign.Center
-            )
-
-            TextButton(onClick = onCancel) {
-                Text("Cancelar búsqueda")
-            }
-        }
-    }
+    LoadingPanel(
+        title = if (isScanning) "Buscando tu cooler…" else "Conectando…",
+        message = statusMessage,
+        onCancel = onCancel,
+        modifier = modifier
+    )
 }
 
 /**
@@ -239,9 +214,13 @@ private fun DeviceTypeCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .animateContentSize()
             .alpha(if (enabled) 1f else 0.45f)
-            .clip(MaterialTheme.shapes.large)
-            .clickable(enabled = enabled, onClick = onSelect),
+            .clickable(
+                enabled = enabled,
+                onClick = onSelect,
+                onClickLabel = "Seleccionar modelo"
+            ),
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
@@ -258,13 +237,13 @@ private fun DeviceTypeCard(
             Box(
                 modifier = Modifier
                     .size(72.dp)
-                    .clip(MaterialTheme.shapes.medium)
+                    .clip(MaterialTheme.shapes.large)
                     .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                 contentAlignment = Alignment.Center
             ) {
                 Image(
                     painter = painterResource(deviceType.imageRes),
-                    contentDescription = null,
+                    contentDescription = "Imagen de ${deviceType.deviceName}",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxSize()
@@ -359,46 +338,6 @@ private fun HelpCard() {
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun ErrorBanner(
-    message: String,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.large)
-            .clickable(onClick = onDismiss),
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Warning,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.size(24.dp)
-            )
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.weight(1f)
-            )
         }
     }
 }

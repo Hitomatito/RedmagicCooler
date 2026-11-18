@@ -36,7 +36,15 @@ private val DarkColorScheme = darkColorScheme(
     surfaceVariant = Color(0xFF44474E),
     onSurfaceVariant = Color(0xFFC4C6D0),
     outline = Color(0xFF8E9099),
-    outlineVariant = Color(0xFF44474E)
+    outlineVariant = Color(0xFF44474E),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    errorContainer = Color(0xFF93000A),
+    onErrorContainer = Color(0xFFFFDAD6),
+    inverseSurface = Color(0xFFE2E2E9),
+    inverseOnSurface = Color(0xFF2F3037),
+    inversePrimary = Color(0xFF315B8D),
+    surfaceTint = Color(0xFFA8C7FA)
 )
 
 private val LightColorScheme = lightColorScheme(
@@ -57,7 +65,15 @@ private val LightColorScheme = lightColorScheme(
     surfaceVariant = Color(0xFFE0E2EC),
     onSurfaceVariant = Color(0xFF44474E),
     outline = Color(0xFF74777F),
-    outlineVariant = Color(0xFFC4C6D0)
+    outlineVariant = Color(0xFFC4C6D0),
+    error = Color(0xFFB3261E),
+    onError = Color.White,
+    errorContainer = Color(0xFFF9DEDC),
+    onErrorContainer = Color(0xFF410E0B),
+    inverseSurface = Color(0xFF313033),
+    inverseOnSurface = Color(0xFFF4EFF4),
+    inversePrimary = Color(0xFF82A6D9),
+    surfaceTint = Color(0xFF415F91)
 )
 
 /** Esquinas: tarjetas grandes y controles suaves, sin llegar a "burbuja". */

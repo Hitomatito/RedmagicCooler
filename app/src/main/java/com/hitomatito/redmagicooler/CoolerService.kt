@@ -346,12 +346,24 @@ class CoolerService : Service() {
         // Mostrar métricas finales de batería
         logBatteryMetrics()
         
-        // CRÍTICO: Limpiar estado del perfil SIEMPRE al destruir
+        // Limpiar el modo auto al destruir. La conexión NO se cierra aquí (el GATT
+        // es compartido con MainActivity), así que solo marcamos el perfil como
+        // desconectado si el motor BLE ya no está conectado: marcarlo siempre dejaba
+        // la UI en "Desconectado" mientras el cooler seguía conectado tras pasar a manual.
         activeProfile?.let { profile ->
             try {
-                ProfileRepository.getInstance(this).updateAutoMode(profile.id, false)
-                ProfileRepository.getInstance(this).updateConnectionState(profile.id, false)
-                Log.d(TAG, "Estado del perfil ${profile.name} limpiado en onDestroy")
+                val repository = ProfileRepository.getInstance(this)
+                repository.updateAutoMode(profile.id, false)
+                val stillConnected =
+                    CoolerBleManager.state.value == CoolerBleManager.ConnectionState.CONNECTED
+                if (!stillConnected) {
+                    repository.updateConnectionState(profile.id, false)
+                }
+                Log.d(
+                    TAG,
+                    "Estado del perfil ${profile.name} limpiado en onDestroy " +
+                        "(BLE conectado=$stillConnected)"
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Error limpiando estado del perfil: ${e.message}")
             }
@@ -453,15 +465,17 @@ class CoolerService : Service() {
         // Estado térmico con lectura válida: la notificación muestra temperatura y ventilador.
         val isThermal = status in THERMAL_STATUSES
 
+        val profileSuffix = activeProfile?.displayName?.let { " · $it" }.orEmpty()
         val title: String
         val contentText: String
         if (isThermal) {
             title = if (speed > 0) {
-                "${"%.1f".format(temp)} °C · Ventilador $speed%"
+                "${"%.1f".format(temp)} °C · Ventilador $speed%$profileSuffix"
             } else {
-                "${"%.1f".format(temp)} °C · En reposo"
+                "${"%.1f".format(temp)} °C · En reposo$profileSuffix"
             }
-            contentText = "Modo automático · $status"
+            contentText = "Modo automático · $status · Rampa " +
+                "${ThermalLogic.TEMP_SAFE}–${ThermalLogic.TEMP_CRITICAL} °C"
         } else {
             title = "Modo automático"
             contentText = status

@@ -53,7 +53,7 @@ class ProfileRepository(context: Context) {
                 }
             }
             
-            _profiles.value = loadedProfiles.sortedByDescending { it.lastConnectedAt }
+            _profiles.value = loadedProfiles
             Log.d(TAG, "Cargados ${loadedProfiles.size} perfiles")
         } catch (e: Exception) {
             Log.e(TAG, "Error cargando perfiles: ${e.message}", e)
@@ -93,8 +93,7 @@ class ProfileRepository(context: Context) {
             ))
         }
         
-        val updatedList = _profiles.value + profile
-        _profiles.value = updatedList.sortedByDescending { it.lastConnectedAt }
+        _profiles.value = listOf(profile) + _profiles.value
         saveProfiles()
         
         Log.d(TAG, "Perfil agregado: ${profile.displayName} (${profile.macAddress})")
@@ -109,7 +108,7 @@ class ProfileRepository(context: Context) {
         val updatedList = _profiles.value.map { 
             if (it.id == profile.id) profile else it 
         }
-        _profiles.value = updatedList.sortedByDescending { it.lastConnectedAt }
+        _profiles.value = updatedList
         saveProfiles()
         Log.d(TAG, "Perfil actualizado: ${profile.displayName}")
         return profile
@@ -156,6 +155,8 @@ class ProfileRepository(context: Context) {
      */
     fun updateFanSpeed(profileId: String, speed: Int) {
         val profile = getProfile(profileId) ?: return
+        // Evita reemitir toda la lista (y recomponer el NavHost) con el mismo valor
+        if (profile.fanSpeed == speed) return
         updateProfile(profile.copy(fanSpeed = speed))
     }
     
@@ -181,6 +182,47 @@ class ProfileRepository(context: Context) {
     fun renameProfile(profileId: String, newName: String) {
         val profile = getProfile(profileId) ?: return
         updateProfile(profile.copy(name = newName))
+    }
+
+    /**
+     * Duplica la configuración de un perfil. La copia queda sin MAC para que se
+     * vincule al conectar el cooler, evitando dos perfiles con la misma dirección.
+     */
+    fun duplicateProfile(profileId: String): CoolerProfile? {
+        val profile = getProfile(profileId) ?: return null
+        val copy = profile.copy(
+            id = java.util.UUID.randomUUID().toString(),
+            name = "Copia de ${profile.displayName}",
+            macAddress = "",
+            createdAt = System.currentTimeMillis(),
+            lastConnectedAt = System.currentTimeMillis(),
+            isConnected = false,
+            isAutoMode = false,
+            signalStrength = 0
+        )
+        _profiles.value = listOf(copy) + _profiles.value
+        saveProfiles()
+        Log.d(TAG, "Perfil duplicado: ${copy.displayName}")
+        return copy
+    }
+
+    /** Mueve un perfil una posición arriba (-1) o abajo (1) en la lista. */
+    fun moveProfile(profileId: String, delta: Int) {
+        val list = _profiles.value.toMutableList()
+        val from = list.indexOfFirst { it.id == profileId }
+        val to = from + delta
+        if (from < 0 || to < 0 || to >= list.size) return
+        val moved = list.removeAt(from)
+        list.add(to, moved)
+        _profiles.value = list
+        saveProfiles()
+    }
+
+    /** Vincula la MAC real cuando un perfil creado como copia se conecta. */
+    fun updateMacAddress(profileId: String, macAddress: String) {
+        val profile = getProfile(profileId) ?: return
+        if (profile.macAddress == macAddress) return
+        updateProfile(profile.copy(macAddress = macAddress))
     }
     
     /**

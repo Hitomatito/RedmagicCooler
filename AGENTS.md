@@ -10,6 +10,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
   ```
 - Android SDK: `~/Android/Sdk` (wired in `local.properties`, platform `android-37.0`, build-tools `36.0.0`).
 - Toolchain: Gradle 9.9.1 (wrapper), AGP 9.5.1, Kotlin 2.4.21 (`gradle/libs.versions.toml` — the README badge saying 2.3 is stale). The tracked `gradle/gradle-daemon-jvm.properties` pins the daemon JVM to **JDK 25** (JetBrains, auto-provisioned via the foojay resolver plugin in `settings.gradle.kts`); the exported `JAVA_HOME` above (JDK 21) is still needed for direct `./gradlew` launches. CI sets up JDK 21.
+- Dependencies are declared only in `gradle/libs.versions.toml`. `settings.gradle.kts` sets `RepositoriesMode.FAIL_ON_PROJECT_REPOS`, so adding a `repositories {}` block to a module build file fails configuration — add repos centrally in `settings.gradle.kts`.
 - `.idea/` is partially tracked (code styles, run configurations, inspection profiles are committed; `caches/`, `workspace.xml` etc. are gitignored). Don't commit IDE noise blindly.
 - Android Studio may rewrite `gradle/libs.versions.toml` and `gradle/wrapper/gradle-wrapper.properties` on sync (version upgrades). If those are dirty and you didn’t touch them, don’t commit them blindly. The current wrapper bump keeps `retries=0` and `retryBackOffMs=500`; change those only when intentionally updating Gradle.
 
@@ -23,7 +24,8 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
 # Single test: ./gradlew :app:testDebugUnitTest --tests "com.hitomatito.redmagicooler.ExampleUnitTest"
 ```
 
-- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon`. The README's `./gradlew test` is not the CI command. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
+- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon` (push/PR to `main`, plus `workflow_dispatch`). The README's `./gradlew test` is not the CI command. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
+- Bumping the Android SDK means editing three places in sync: `app/build.gradle.kts` (`compileSdk { version = release(N) }` and `targetSdk`), CI's `sdkmanager` line, and the requirements table in `README.md`.
 - App version lives in `app/build.gradle.kts` `defaultConfig`: `versionCode = 7`, `versionName = "1.4.0"` (bump both for `chore: subir versión` commits).
 - `assembleRelease` enables R8 minify + resource shrinking (v2/v3/v4 signing when `keystore.properties` exists); keep `app/proguard-rules.pro` WorkManager/line-number rules when adding workers.
 - Release signing is conditional on root `keystore.properties` (gitignored, never commit); without it release builds unsigned.
@@ -39,7 +41,7 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 | Centralized runtime permissions | `BlePermissionManager.kt` |
 | Compose UI + navigation | `MainActivity.kt`, `ui/` |
 | Auto-mode foreground service (client of BLE engine) | `CoolerService.kt` |
-| Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt` (Android wrapper: sensors, loop, lock), `ThermalLogic.kt` (pure Kotlin: EMA, trend, ramp, thresholds — no Android/clock), `ThermalMonitorManager.kt` (singleton; `initialize(context)` once, UI + service share it) |
+| Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt` (Android wrapper: sensors, loop, lock), `ThermalLogic.kt` (pure Kotlin: EMA, trend, ramp, thresholds — no Android/clock), `ThermalMonitorManager.kt` (singleton; `CoolerService` initializes it only while auto mode runs — the UI does not keep sensors active) |
 | Profile persistence (SharedPreferences + JSON, `StateFlow`) | `data/ProfileRepository.kt` (singleton) |
 | Scanner/connection helpers | `utils/BleConnectionHelper.kt` |
 | Supported cooler models (manufacturer subtype + drawable) | `CoolerDeviceType.kt` (**package root, not `model/`**) |
