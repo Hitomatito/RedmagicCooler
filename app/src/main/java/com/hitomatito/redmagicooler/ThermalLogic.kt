@@ -66,27 +66,31 @@ internal data class ThermalDecision(
 )
 
 internal fun tempLevelForSignal(value: Float): ThermalMonitor.TempLevel = when {
-    value < ThermalLogic.TEMP_SAFE -> ThermalMonitor.TempLevel.SAFE
+    value.isNaN() || value < ThermalLogic.TEMP_SAFE -> ThermalMonitor.TempLevel.SAFE
     value < ThermalLogic.TEMP_WARM -> ThermalMonitor.TempLevel.WARM
     value < ThermalLogic.TEMP_HOT -> ThermalMonitor.TempLevel.HOT
     else -> ThermalMonitor.TempLevel.CRITICAL
 }
 
-internal fun targetSpeedFor(temp: Float): Int = when {
-    temp < ThermalLogic.TEMP_SAFE -> 0
-    temp < ThermalLogic.TEMP_WARM -> {
-        val ratio = (temp - ThermalLogic.TEMP_SAFE) / (ThermalLogic.TEMP_WARM - ThermalLogic.TEMP_SAFE)
-        (25 + ratio * 25).toInt().coerceIn(0, 100)
+internal fun targetSpeedFor(temp: Float): Int {
+    if (temp.isNaN() || temp < 0f) return 0
+    if (temp.isInfinite()) return if (temp > 0f) 100 else 0
+    return when {
+        temp < ThermalLogic.TEMP_SAFE -> 0
+        temp < ThermalLogic.TEMP_WARM -> {
+            val ratio = (temp - ThermalLogic.TEMP_SAFE) / (ThermalLogic.TEMP_WARM - ThermalLogic.TEMP_SAFE)
+            (25 + ratio * 25).toInt().coerceIn(0, 100)
+        }
+        temp < ThermalLogic.TEMP_HOT -> {
+            val ratio = (temp - ThermalLogic.TEMP_WARM) / (ThermalLogic.TEMP_HOT - ThermalLogic.TEMP_WARM)
+            (50 + ratio * 25).toInt().coerceIn(0, 100)
+        }
+        temp < ThermalLogic.TEMP_CRITICAL -> {
+            val ratio = (temp - ThermalLogic.TEMP_HOT) / (ThermalLogic.TEMP_CRITICAL - ThermalLogic.TEMP_HOT)
+            (75 + ratio * 25).toInt().coerceIn(0, 100)
+        }
+        else -> 100
     }
-    temp < ThermalLogic.TEMP_HOT -> {
-        val ratio = (temp - ThermalLogic.TEMP_WARM) / (ThermalLogic.TEMP_HOT - ThermalLogic.TEMP_WARM)
-        (50 + ratio * 25).toInt().coerceIn(0, 100)
-    }
-    temp < ThermalLogic.TEMP_CRITICAL -> {
-        val ratio = (temp - ThermalLogic.TEMP_HOT) / (ThermalLogic.TEMP_CRITICAL - ThermalLogic.TEMP_HOT)
-        (75 + ratio * 25).toInt().coerceIn(0, 100)
-    }
-    else -> 100
 }
 
 private fun ema(previous: Float, raw: Float): Float =
@@ -146,13 +150,16 @@ internal fun adaptiveInterval(
 
 /** Pico del SoC (CPU/GPU), nunca de batería, cargador o módem. */
 internal fun hardwarePeak(zones: Map<String, Float>): Float =
-    zones.filter { (key, _) ->
+    zones.asSequence().filter { (key, temp) ->
         val normalized = key.lowercase()
-        (normalized.contains("cpu") || normalized.contains("tsens") ||
-            normalized.contains("gpu") || normalized.contains("kgsl") ||
-            normalized.contains("soc")) &&
-            !normalized.contains("skin") && !normalized.contains("case")
-    }.values.maxOrNull() ?: 0f
+        temp in 0f..115f &&
+            (normalized.contains("cpu") || normalized.contains("tsens") ||
+                normalized.contains("gpu") || normalized.contains("kgsl") ||
+                normalized.contains("soc")) &&
+            !normalized.contains("skin") && !normalized.contains("case") &&
+            !normalized.contains("battery") && !normalized.contains("bms") &&
+            !normalized.contains("charger") && !normalized.contains("modem")
+    }.maxOfOrNull { it.value } ?: 0f
 
 internal fun aggregateThermalZones(readings: List<Pair<String, Float>>): Map<String, Float> {
     val result = LinkedHashMap<String, Float>()

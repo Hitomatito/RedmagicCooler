@@ -70,6 +70,20 @@ class ThermalLogicTest {
     }
 
     @Test
+    fun `guardias numericas en velocidad y nivel de senal`() {
+        assertEquals(0, targetSpeedFor(Float.NaN))
+        assertEquals(100, targetSpeedFor(Float.POSITIVE_INFINITY))
+        assertEquals(0, targetSpeedFor(Float.NEGATIVE_INFINITY))
+        assertEquals(0, targetSpeedFor(-10f))
+        assertEquals(0, targetSpeedFor(-0.1f))
+
+        assertEquals(SAFE, tempLevelForSignal(Float.NaN))
+        assertEquals(SAFE, tempLevelForSignal(Float.NEGATIVE_INFINITY))
+        assertEquals(CRITICAL, tempLevelForSignal(Float.POSITIVE_INFINITY))
+        assertEquals(SAFE, tempLevelForSignal(-5f))
+    }
+
+    @Test
     fun `primera muestra inicializa EMA`() {
         val decision = decide(ControlState(), sample(skinTemp = 50f), 1_000L, advance = true)
         assertEquals(50f, decision.maxTemp, 0.001f)
@@ -288,6 +302,28 @@ class ThermalLogicTest {
             ),
         )
         assertEquals(58f, peak, 0.001f)
+    }
+
+    @Test
+    fun `pico hardware filtra outliers y sensores de carga o modem`() {
+        val peak = hardwarePeak(
+            mapOf(
+                "cpu0" to 60f,
+                "cpu1" to 150f,
+                "cpu_nan" to Float.NaN,
+                "cpu_inf" to Float.POSITIVE_INFINITY,
+                "gpu" to -10f,
+                "soc_charger" to 70f,
+                "bms_soc" to 85f,
+                "modem_temp" to 90f,
+                "battery" to 95f,
+            ),
+        )
+        assertEquals(60f, peak, 0.001f)
+
+        // Verificación de bordes exactos 0f y 115f
+        assertEquals(0f, hardwarePeak(mapOf("cpu" to 0f)), 0.001f)
+        assertEquals(115f, hardwarePeak(mapOf("cpu" to 115f)), 0.001f)
     }
 
     @Test
