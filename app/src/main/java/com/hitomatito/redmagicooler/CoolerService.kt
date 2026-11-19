@@ -7,12 +7,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.hitomatito.redmagicooler.model.CoolerBleConstants
 import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
@@ -104,7 +106,12 @@ class CoolerService : Service() {
         // Restaurar estado guardado
         loadState()
         
-        startForeground(NOTIFICATION_ID, createNotification("Iniciando...", currentSpeed, currentTemp))
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            createNotification("Iniciando...", currentSpeed, currentTemp),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        )
         
         // Monitor térmico único compartido con la actividad
         ThermalMonitorManager.initialize(this)
@@ -224,10 +231,13 @@ class CoolerService : Service() {
                         }
 
                         // Reutilizar conexión si el motor BLE ya está conectado a ESTE cooler
-                        // (evita el ciclo desconectar+volver a conectar+re-discovery al activar Auto)
+                        // (evita el ciclo desconectar+volver a conectar+re-discovery al activar Auto).
+                        // También vale si el enlace está arriba pero el discovery sigue pendiente:
+                        // reconectar aquí cierra el GATT a mitad de discovery y deja 0 servicios.
                         val yaConectado = CoolerBleManager.isHealthy() &&
                             CoolerBleManager.currentConnectedAddress()?.equals(deviceMac, ignoreCase = true) == true
-                        if (yaConectado) {
+                        val conexionEnCurso = CoolerBleManager.isBusyWith(deviceMac)
+                        if (yaConectado || conexionEnCurso) {
                             logDebug("Ya conectado al cooler. No hace falta reconectar (modo automático)")
                             pendingRGBConfig?.let { cfg ->
                                 CoolerBleManager.applyPendingRGB(cfg)
@@ -278,7 +288,7 @@ class CoolerService : Service() {
             }
             ACTION_SWITCH_TO_MANUAL -> {
                 logDebug("ACTION_SWITCH_TO_MANUAL: Cambiando a modo manual sin desconectar")
-                switchToManualMode()
+                switchToManualMode(startId)
             }
             ACTION_USE_CONNECTED_DEVICE -> {
                 // Conectar directamente usando la MAC del dispositivo ya conectado
@@ -387,7 +397,11 @@ class CoolerService : Service() {
      * Según el logcat de la app original, se escribe 0x00 para cambiar el modo
      * Este método NO desconecta el dispositivo, solo cambia el modo de operación
      */
-    private fun switchToManualMode() {
+    private fun switchToManualMode(targetStartId: Int? = null) {
+        // stopSelf(startId) solo detiene si ningún startId más reciente llegó desde
+        // entonces: si el usuario reactiva el modo auto durante los 2000 ms de gracia,
+        // la orden de paro diferida con el startId obsoleto se ignora y la sesión
+        // automática recién iniciada sobrevive (evita la carrera descrita en el plan).
         if (!CoolerBleManager.setAutoMode()) {
             Log.e(TAG, "No se pudo escribir el comando de cambio a modo manual")
             // Sin GATT el cooler puede seguir en auto, pero gana la intención del usuario:
@@ -402,7 +416,7 @@ class CoolerService : Service() {
             updateNotification("Manual (sin conexión)", currentSpeed, currentTemp)
             serviceScope.launch {
                 delay(2000)
-                stopSelf()
+                if (targetStartId != null) stopSelf(targetStartId) else stopSelf()
             }
             return
         }
@@ -430,7 +444,7 @@ class CoolerService : Service() {
                 serviceScope.launch {
                     delay(2000) // Dar tiempo para que el comando se procese
                     logDebug("Deteniendo servicio después de cambiar a modo manual")
-                    stopSelf()
+                    if (targetStartId != null) stopSelf(targetStartId) else stopSelf()
                 }
             }
         } catch (e: Exception) {
