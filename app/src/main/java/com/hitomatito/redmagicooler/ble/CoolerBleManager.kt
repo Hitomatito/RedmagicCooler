@@ -607,6 +607,11 @@ object CoolerBleManager {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Error descubriendo servicios: $status")
                 _events.tryEmit(BleEvent.ConnectionFailed("Error descubriendo servicios ($status)"))
+                // Sin reintento el modo auto queda desconectado para siempre hasta
+                // que el usuario lo apague y lo vuelva a encender.
+                closeGattInternal()
+                _state.value = ConnectionState.DISCONNECTED
+                scheduleReconnect()
                 return
             }
             val services = gatt.services ?: emptyList()
@@ -753,6 +758,9 @@ object CoolerBleManager {
             _events.tryEmit(BleEvent.ConnectionFailed("El cooler no expuso el servicio del ventilador"))
             closeGattInternal()
             _state.value = ConnectionState.DISCONNECTED
+            // Mismo motivo que en onServicesDiscovered: sin reintento el motor
+            // se queda muerto y el modo auto deja de supervisar el cooler.
+            scheduleReconnect()
             return
         }
 
@@ -932,6 +940,16 @@ object CoolerBleManager {
     }
 
     fun isHealthy(): Boolean = isConnected && fanCharacteristic != null
+
+    /**
+     * true si el motor ya está conectando o conectado a esta MAC, aunque el
+     * discovery de servicios siga pendiente. Evita que un segundo comandante
+     * (p. ej. ACTION_START_AUTO tras la reconexión de onCreate) cierre el GATT
+     * a mitad de discovery y provoque "Servicios descubiertos: 0".
+     */
+    fun isBusyWith(macAddress: String): Boolean =
+        state.value != ConnectionState.DISCONNECTED &&
+            connectedCoolerDevice?.address?.equals(macAddress, ignoreCase = true) == true
 
     fun currentConnectedAddress(): String? = connectedCoolerDevice?.address
 }
