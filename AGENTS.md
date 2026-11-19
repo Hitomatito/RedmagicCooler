@@ -24,7 +24,7 @@ Unofficial Android client for RedMagic/Nubia magnetic coolers over BLE. Single-m
 # Single test: ./gradlew :app:testDebugUnitTest --tests "com.hitomatito.redmagicooler.ThermalLogicTest"
 ```
 
-- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon` (push/PR to `main`, plus `workflow_dispatch`). The README's `./gradlew test` is not the CI command. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
+- CI (`.github/workflows/ci.yml`) runs `testDebugUnitTest`, `assembleDebug`, `assembleRelease` on JDK 21 with `--no-daemon` (push/PR to `main`, plus `workflow_dispatch`) — the same tasks the README documents. No custom lint/detekt/ktlint/spotless configured — don’t invent those tasks. `gradle.properties` sets `kotlin.code.style=official`.
 - Bumping the Android SDK means editing three places in sync: `app/build.gradle.kts` (`compileSdk { version = release(N) }` and `targetSdk`), CI's `sdkmanager` line, and the requirements table in `README.md`.
 - App version lives in `app/build.gradle.kts` `defaultConfig`: `versionCode = 8`, `versionName = "1.4.1"` (bump both for `chore: subir versión` commits).
 - `assembleRelease` enables R8 minify + resource shrinking (v2/v3/v4 signing when `keystore.properties` exists); keep `app/proguard-rules.pro` WorkManager/line-number rules when adding workers.
@@ -59,10 +59,12 @@ A duplicated profile is created with a **blank `macAddress`** and binds to the r
 ## BLE protocol facts (reverse-engineered, no public spec)
 
 - Fan service `d52082ad-e805-9f97-9d4e-1c682d9c9ce6`; characteristics `0x1012` (fan speed), `0x1013` (RGB), `0x1015` (temperature notify), `0x1018` (auto mode).
-- Detection accepts advertising service `00004a41-...` **or** manufacturer data (company ID `2250` / `0x08CA`, byte `[0] = 5` fan, byte `[1] = generation subtype`). Several models share subtypes (5 and 6), so BLE-name matching (`matchesBleName`) disambiguates and ties fall to the lowest generation. Keep `CoolerDeviceType.fromScanRecord` as the source of truth when adding models.
+- Detection accepts advertising service `00004a41-...` **or** manufacturer data (company ID `2250` / `0x08CA`, byte `[0] = 5` fan, byte `[1] = generation subtype`). Several models share subtypes (4, 5 and 6 — e.g. `JACKET_6` advertises `[4, 6]`), so BLE-name matching (`matchesBleName`) disambiguates and ties fall to the lowest generation (subType 5 → Heat Sink 5 Lite). Keep `CoolerDeviceType.fromScanRecord` as the source of truth when adding models.
 - RGB command = 4 bytes: `[effectCode, r, g, b]`. Effect codes: `0x01` colorful, `0x02` full-color breath, `0x03` single-color breath, `0x04` always bright.
 - `status == 22` (`GATT_CONN_TERMINATE_LOCAL_HOST`) is a known cooler firmware limitation, not an app bug. The engine auto-reconnects with backoff and `discoverServices()` has a watchdog that forces a retry/reconnect.
 - GATT lifecycle rules that matter: always `disconnect()` **then** `close()`; closing before the stack confirms the disconnect breaks the next service discovery. Use `BleConnectionHelper.safeCloseGatt` / `safeStopScan`.
+- One commander at a time: before `connectDevice`/`reconnect`, callers must skip the call when `CoolerBleManager.isBusyWith(mac)` is true. Reconnecting while the link is up but `discoverServices()` is still pending tears down the GATT and surfaces as `Servicios descubiertos: 0`.
+- Both discovery failure paths (`onServicesDiscovered` with a non-success status, and a missing fan characteristic) must `scheduleReconnect()`; closing the GATT there without a retry leaves auto mode dead until the cooler is power-cycled.
 - `CoolerBleManager` queues GATT operations one at a time; Android drops bursted writes. Preserve the op queue when adding characteristics.
 
 ### Fan-speed range
@@ -74,13 +76,13 @@ The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` →
 - **UI strings are hardcoded Spanish** — `res/values/strings.xml` contains only `app_name`, and there is zero `stringResource` usage in the codebase. Inline Spanish literals are the existing convention; don’t route new strings through `strings.xml` unless asked to localize.
 - Code comments, KDoc and log messages are in **Spanish**; the README is in **English**. Match the file you edit.
 - Compose animations use `rememberReduceMotion()` from `ui/MotionUtils.kt` to respect the system reduced-motion setting; follow it for new animations.
-- Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.4.0`, `docs: ...`. Recent commits mix in English. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main` (one `feat/<english-slug>` branch exists).
+- Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.4.0`, `docs: ...`. Recent commits mix in English. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main`.
 - `settings.gradle.kts` has `rootProject.name = "RedmagiCooler"` (missing "c") while the application id, package and app label are `RedmagicCooler` / `redmagicooler`. Don’t rename casually — it changes the Gradle module name.
 - `CoolerService.DEBUG` follows `BuildConfig.DEBUG` (verbose in debug, off in release); R8 also strips `Log.d`/`Log.i` in release via `app/proguard-rules.pro`. No manual flip needed.
 
 ## Testing reality
 
-- Real coverage exists only for thermal logic: `ThermalLogicTest.kt` (19 JUnit4 tests, pure JVM — no Android classes, no new deps). Everything else is still the AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`). No mocking library is wired up (`testImplementation` is plain JUnit4 only — no MockK, no Robolectric, no Turbine); adding Android-dependent tests means adding deps to `gradle/libs.versions.toml`.
+- Real coverage exists only for thermal logic: `ThermalLogicTest.kt` (pure JVM — no Android classes, no new deps). Everything else is still the AS templates (`ExampleUnitTest`, `ExampleInstrumentedTest`). No mocking library is wired up (`testImplementation` is plain JUnit4 only — no MockK, no Robolectric, no Turbine); adding Android-dependent tests means adding deps to `gradle/libs.versions.toml`.
 - Code that touches Android framework classes (`Context`, `BluetoothGatt`, `SensorManager`) is untestable as written; extracting pure logic (as done with `ThermalLogic.kt`) is the established path to coverage.
 
 ## Do not
