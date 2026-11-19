@@ -20,3 +20,6 @@ local.properties
 keystore.properties
 *.jks
 *.keystore
+
+# Índice local de CodeGraph (generado con `codegraph init`)
+/.codegraph/
