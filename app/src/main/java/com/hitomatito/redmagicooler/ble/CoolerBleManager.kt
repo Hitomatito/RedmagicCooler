@@ -119,6 +119,9 @@ object CoolerBleManager {
     private sealed interface GattOp {
         val label: String
         fun execute(gatt: BluetoothGatt): Boolean
+        fun completedByWrite(c: BluetoothGattCharacteristic): Boolean = false
+        fun completedByDescriptorWrite(d: BluetoothGattDescriptor): Boolean = false
+        fun completedByValue(c: BluetoothGattCharacteristic): Boolean = false
     }
 
     private data class WriteCharacteristicOp(
@@ -126,6 +129,8 @@ object CoolerBleManager {
         val value: ByteArray,
         override val label: String
     ) : GattOp {
+        override fun completedByWrite(c: BluetoothGattCharacteristic): Boolean = c === characteristic
+
         @SuppressLint("MissingPermission")
         @Suppress("DEPRECATION")
         override fun execute(gatt: BluetoothGatt): Boolean {
@@ -139,6 +144,8 @@ object CoolerBleManager {
         val value: ByteArray,
         override val label: String
     ) : GattOp {
+        override fun completedByDescriptorWrite(d: BluetoothGattDescriptor): Boolean = d === descriptor
+
         @SuppressLint("MissingPermission")
         @Suppress("DEPRECATION")
         override fun execute(gatt: BluetoothGatt): Boolean {
@@ -151,6 +158,10 @@ object CoolerBleManager {
         val characteristic: BluetoothGattCharacteristic,
         override val label: String
     ) : GattOp {
+        // El valor de una lectura puede llegar como respuesta al read o como
+        // notificación temprana del periférico: cualquiera satisface la operación.
+        override fun completedByValue(c: BluetoothGattCharacteristic): Boolean = c === characteristic
+
         @SuppressLint("MissingPermission")
         override fun execute(gatt: BluetoothGatt): Boolean =
             gatt.readCharacteristic(characteristic)
@@ -323,6 +334,11 @@ object CoolerBleManager {
             Log.e(TAG, "Dirección MAC inválida: $macAddress")
             return
         }
+        // Conexión recién iniciada por el usuario o el servicio: presupuesto de
+        // reintentos limpio. Las cadenas de reconexión del motor pasan por
+        // startScan(resetAttempts=false) y siguen acotadas por MAX_RECONNECT_ATTEMPTS.
+        reconnectAttempts = 0
+        reconnectBackoffMs = 2000L
         connectGatt(device = device, deviceType = deviceType, rssi = -1, context = context)
     }
 
@@ -502,7 +518,7 @@ object CoolerBleManager {
 
         if (!ok) {
             Log.w(TAG, "Op GATT descartada o fallida: ${op.label} (avanzando cola)")
-            completeOp()
+            completeOp { it === op }
         } else {
             // Respaldo: si el callback no llega, avanzar igualmente
             opTimeoutJob?.cancel()
@@ -510,21 +526,35 @@ object CoolerBleManager {
                 delay(OP_TIMEOUT_MS)
                 if (opInProgress) {
                     Log.w(TAG, "Timeout de op GATT (${op.label}); forzando avance")
-                    completeOp()
+                    completeOp { it === op }
                 }
             }
         }
     }
 
-    private fun completeOp() {
-        synchronized(opQueueLock) {
-            if (opQueue.isNotEmpty()) {
+    /**
+     * Avanza la cola solo si el callback corresponde a la operación en vuelo.
+     * Un callback tardío (después de que el timeout de OP_TIMEOUT_MS ya avanzó la
+     * cola) no debe hacer pop de la siguiente operación: eso despacharía dos GATT
+     * simultáneos y rompería el invariant "una op a la vez" del enlace degradado.
+     */
+    private fun completeOp(completedBy: (GattOp) -> Boolean) {
+        val advanced = synchronized(opQueueLock) {
+            val head = opQueue.firstOrNull()
+            if (opInProgress && head != null && completedBy(head)) {
                 opQueue.removeFirst()
+                opInProgress = false
+                true
+            } else {
+                false
             }
-            opInProgress = false
         }
-        opTimeoutJob?.cancel()
-        pumpOpQueue()
+        if (advanced) {
+            opTimeoutJob?.cancel()
+            pumpOpQueue()
+        } else {
+            Log.d(TAG, "Callback GATT de una op no en vuelo (tardío o duplicado): ignorado")
+        }
     }
 
     private fun drainOpQueue() {
@@ -651,7 +681,7 @@ object CoolerBleManager {
                 val hex = data?.joinToString(" ") { "%02x".format(it) } ?: ""
                 Log.d(TAG, "writeCharacteristic OK: ${characteristic.uuid} [$hex]")
             }
-            completeOp()
+            completeOp { it.completedByWrite(characteristic) }
         }
 
         override fun onDescriptorWrite(
@@ -664,7 +694,7 @@ object CoolerBleManager {
             } else {
                 Log.d(TAG, "writeDescriptor OK: ${descriptor.uuid}")
             }
-            completeOp()
+            completeOp { it.completedByDescriptorWrite(descriptor) }
         }
 
         @Deprecated("Deprecated in API 33")
@@ -674,7 +704,7 @@ object CoolerBleManager {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
-            completeOp()
+            completeOp { it.completedByValue(characteristic) }
             handleCharacteristicValue(characteristic)
         }
 
@@ -685,6 +715,9 @@ object CoolerBleManager {
             characteristic: BluetoothGattCharacteristic
         ) {
             handleCharacteristicValue(characteristic)
+            // Una notificación temprana en la característica leída satisface la
+            // lectura pendiente (algunos stacks entregan así la respuesta).
+            completeOp { it.completedByValue(characteristic) }
         }
 
         override fun onCharacteristicChanged(
