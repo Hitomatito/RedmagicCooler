@@ -320,6 +320,9 @@ class MainActivity : ComponentActivity() {
                                 profileRepository.updateFanSpeed(profile.id, speed)
                             },
                             onToggleAutoMode = { toggleAutoMode(profile.id) },
+                            onNoisePreferenceChange = { preference ->
+                                profileRepository.updateNoisePreference(profile.id, preference)
+                            },
                             onConnect = { connectToProfile(profile) },
                             onDisconnect = { disconnectFromCooler() },
                             onDeleteProfile = {
@@ -850,12 +853,11 @@ class MainActivity : ComponentActivity() {
             Log.w(TAG, "setFanSpeed: no conectado")
             return
         }
-        val target = speed.coerceIn(0, 100)
-        // currentCoolerSpeed solo se actualiza con la lectura confirmada por el
-        // cooler (fanSpeedPercent). Así, si una escritura falla, un reintento del
-        // mismo valor no se descarta por el guard.
-        if (currentCoolerSpeed >= 0 && target == currentCoolerSpeed) return
-        CoolerBleManager.setFanSpeed(target)
+        // Sin guard de "igual a la última lectura": en modo manual no hay lecturas
+        // periódicas, currentCoolerSpeed queda obsoleto y un cambio brusco (p. ej.
+        // 100 -> 0) se descartaba silenciosamente dejando el cooler acelerado.
+        // La escritura cruda es idempotente y el motor ya serializa la cola GATT.
+        CoolerBleManager.setFanSpeed(speed.coerceIn(0, 100))
     }
 
     override fun onDestroy() {

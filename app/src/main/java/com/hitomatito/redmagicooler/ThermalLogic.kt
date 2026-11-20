@@ -1,12 +1,23 @@
 package com.hitomatito.redmagicooler
 
-private const val EMA_ALPHA = 0.35f
+import kotlin.math.roundToInt
+
+private const val EMA_ALPHA_COMFORT = 0.35f
+private const val EMA_ALPHA_HARDWARE = 0.25f
 private const val TREND_LOOKAHEAD_MS = 30_000L
-private const val DOWN_DEADBAND_PERCENT = 5
+private const val UP_DEADBAND_PERCENT = 5
+private const val DOWN_DEADBAND_PERCENT = 10
+private const val SPEED_QUANTUM = 5
 
 /**
  * Lógica térmica pura: sin Android ni reloj. El tiempo se inyecta como [nowMs]
  * para que la rampa y la histéresis sean deterministas y testeables.
+ *
+ * La velocidad no depende de una sola fuente: se fusionan el confort (piel o
+ * batería), el SoC (CPU/GPU) reescalado a la escala de confort y el estado
+ * térmico del sistema (0-6). La fusión reacciona antes que esperar al crítico,
+ * pero con rampas lentas y bandas muertas para que el ventilador sea estable y
+ * silencioso. El estado crítico confirmado sigue mandando sobre la fusión.
  */
 internal object ThermalLogic {
     const val TEMP_SAFE = 40
@@ -16,14 +27,47 @@ internal object ThermalLogic {
 
     const val SPEED_INCREMENT = 10
     const val EMERGENCY_INCREMENT = 20
-    const val INCREASE_DELAY_MS = 20_000L
+    const val INCREASE_DELAY_MS = 30_000L
     const val EMERGENCY_INCREASE_DELAY_MS = 10_000L
     const val DECREASE_DELAY_MS = 10_000L
     const val CRITICAL_SUSTAINED_MS = 45_000L
     const val CRITICAL_EXIT_TEMP = 50f
     const val CRITICAL_EXIT_MS = 30_000L
+
     const val THERMAL_STATUS_MODERATE = 2
+    const val THERMAL_STATUS_SEVERE = 3
+
+    /** Un SoC a 45 °C equivale a 40 °C de confort; uno a 75 °C, a 60 °C. */
+    const val SOC_EQUIV_MIN_C = 45f
+    const val SOC_EQUIV_SPAN_C = 30f
+    const val SOC_EQUIV_FLOOR_C = 40f
+    const val SOC_EQUIV_RANGE_C = 20f
+    const val SOC_EQUIV_MAX_C = 70f
+
+    /** Apagado de pantalla: el equipo suele estar ocioso, no dispares el ventilador. */
+    const val SCREEN_OFF_SOC_FACTOR = 0.85f
+
+    /** Cargar con pantalla encendida añade calor externo; de noche no despiertes el ventilador. */
+    const val CHARGING_BIAS_C = 2f
+
+    /** Preferencia de ruido: 0 = máximo rendimiento, 100 = máximo silencio. */
+    const val NOISE_PERFORMANCE_THRESHOLD = 33
+    const val NOISE_QUIET_THRESHOLD = 67
+    const val NOISE_FACTOR_MIN = 0.75f
+    const val NOISE_FACTOR_RANGE = 0.5f
+
+    const val QUIET_INCREMENT = 5
+    const val PERFORMANCE_INCREMENT = 15
+    const val QUIET_INCREASE_DELAY_MS = 45_000L
+    const val PERFORMANCE_INCREASE_DELAY_MS = 20_000L
+    const val QUIET_DECREASE_DELAY_MS = 20_000L
+    const val PERFORMANCE_DECREASE_DELAY_MS = 10_000L
 }
+
+/** Ajustes del usuario que modulan la curva sin cambiar la seguridad. */
+internal data class ThermalTuning(
+    val noisePreference: Int = 50,
+)
 
 internal data class ControlState(
     val lastRecommendedSpeed: Int = 0,
@@ -46,6 +90,8 @@ internal data class ThermalSample(
     val skinTemp: Float = 0f,
     val hardwarePeakTemp: Float = 0f,
     val thermalStatus: Int = 0,
+    val charging: Boolean = false,
+    val screenInteractive: Boolean = true,
     val otherZonesText: String = "",
 )
 
@@ -61,6 +107,7 @@ internal data class ThermalDecision(
     val tempLevel: ThermalMonitor.TempLevel,
     val hardwarePeakTemp: Float,
     val isRiskConfirmed: Boolean,
+    val controlSource: String,
     val adaptiveIntervalMs: Long,
     val state: ControlState,
 )
@@ -72,6 +119,7 @@ internal fun tempLevelForSignal(value: Float): ThermalMonitor.TempLevel = when {
     else -> ThermalMonitor.TempLevel.CRITICAL
 }
 
+/** Curva más tendida que la anterior: el tramo medio baja y solo llega a 100 % al crítico. */
 internal fun targetSpeedFor(temp: Float): Int {
     if (temp.isNaN() || temp < 0f) return 0
     if (temp.isInfinite()) return if (temp > 0f) 100 else 0
@@ -79,37 +127,85 @@ internal fun targetSpeedFor(temp: Float): Int {
         temp < ThermalLogic.TEMP_SAFE -> 0
         temp < ThermalLogic.TEMP_WARM -> {
             val ratio = (temp - ThermalLogic.TEMP_SAFE) / (ThermalLogic.TEMP_WARM - ThermalLogic.TEMP_SAFE)
-            (25 + ratio * 25).toInt().coerceIn(0, 100)
+            (20 + ratio * 25).toInt().coerceIn(0, 100)
         }
         temp < ThermalLogic.TEMP_HOT -> {
             val ratio = (temp - ThermalLogic.TEMP_WARM) / (ThermalLogic.TEMP_HOT - ThermalLogic.TEMP_WARM)
-            (50 + ratio * 25).toInt().coerceIn(0, 100)
+            (45 + ratio * 20).toInt().coerceIn(0, 100)
         }
         temp < ThermalLogic.TEMP_CRITICAL -> {
             val ratio = (temp - ThermalLogic.TEMP_HOT) / (ThermalLogic.TEMP_CRITICAL - ThermalLogic.TEMP_HOT)
-            (75 + ratio * 25).toInt().coerceIn(0, 100)
+            (65 + ratio * 25).toInt().coerceIn(0, 100)
         }
         else -> 100
     }
 }
 
-private fun ema(previous: Float, raw: Float): Float =
-    EMA_ALPHA * raw + (1f - EMA_ALPHA) * previous
+/** Lleva el SoC a la escala de confort: 45 °C -> 40 °C, 75 °C -> 60 °C. */
+internal fun socEquivalentTemp(soc: Float): Float {
+    if (!soc.isFinite() || soc <= 0f) return 0f
+    if (soc <= ThermalLogic.SOC_EQUIV_MIN_C) {
+        return soc * (ThermalLogic.SOC_EQUIV_FLOOR_C / ThermalLogic.SOC_EQUIV_MIN_C)
+    }
+    val scaled = ThermalLogic.SOC_EQUIV_FLOOR_C +
+        (soc - ThermalLogic.SOC_EQUIV_MIN_C) * (ThermalLogic.SOC_EQUIV_RANGE_C / ThermalLogic.SOC_EQUIV_SPAN_C)
+    return scaled.coerceAtMost(ThermalLogic.SOC_EQUIV_MAX_C)
+}
+
+/** Niveles 0-6 de Android expresados como temperatura equivalente de confort. */
+internal fun statusEquivalentTemp(status: Int): Float = when (status.coerceIn(0, 6)) {
+    0, 1 -> 0f
+    2 -> 50f
+    3 -> 55f
+    4 -> 60f
+    5 -> 65f
+    else -> 70f
+}
+
+/** Suelo de velocidad que impone el sistema operativo cuando ya está limitando. */
+internal fun statusFloorSpeed(status: Int): Int = when (status.coerceIn(0, 6)) {
+    0, 1 -> 0
+    2 -> 40
+    3 -> 60
+    4 -> 80
+    5 -> 90
+    else -> 100
+}
+
+private fun Float.sanitizedTemp(): Float = if (isFinite() && this > 0f) this else 0f
+
+private fun ema(previous: Float, raw: Float, alpha: Float): Float =
+    alpha * raw + (1f - alpha) * previous
 
 private fun trend(previous: Float, previousTimeMs: Long, current: Float, nowMs: Long): Float {
     val dtMs = nowMs - previousTimeMs
     return if (dtMs > 0L) (current - previous) / (dtMs / 1000f) else 0f
 }
 
-private fun controlBase(sample: ThermalSample): Float = when {
-    sample.skinTemp > 0f -> sample.skinTemp
-    sample.batteryTemp > 0f -> sample.batteryTemp
-    else -> 0f
+private fun controlBase(sample: ThermalSample): Float {
+    val skin = sample.skinTemp.sanitizedTemp()
+    val battery = sample.batteryTemp.sanitizedTemp()
+    return if (skin > 0f) skin else battery
 }
 
-private fun smoothSignal(previous: Float, previousTimeMs: Long, raw: Float, nowMs: Long, initialized: Boolean): SmoothedSignal {
-    val value = if (initialized) ema(previous, raw) else raw
-    val rate = if (initialized) trend(previous, previousTimeMs, value, nowMs) else 0f
+private fun hardwareBase(sample: ThermalSample): Float = maxOf(
+    sample.hardwarePeakTemp.sanitizedTemp(),
+    sample.cpuTemp.sanitizedTemp(),
+    sample.gpuTemp.sanitizedTemp(),
+)
+
+private fun smoothSignal(
+    previous: Float,
+    previousTimeMs: Long,
+    raw: Float,
+    nowMs: Long,
+    initialized: Boolean,
+    alpha: Float,
+): SmoothedSignal {
+    val safeRaw = raw.sanitizedTemp()
+    val safePrevious = previous.sanitizedTemp()
+    val value = if (initialized) ema(safePrevious, safeRaw, alpha) else safeRaw
+    val rate = if (initialized) trend(safePrevious, previousTimeMs, value, nowMs) else 0f
     val predicted = (value + rate * (TREND_LOOKAHEAD_MS / 1000f)).coerceAtLeast(0f)
     return SmoothedSignal(value, rate, predicted)
 }
@@ -122,16 +218,18 @@ internal fun smooth(state: ControlState, sample: ThermalSample, nowMs: Long): Sm
         raw = controlBase(sample),
         nowMs = nowMs,
         initialized = state.hasSmoothedValue,
+        alpha = EMA_ALPHA_COMFORT,
     )
 
-/** Señal del SoC: se suaviza siempre, también antes de confirmar riesgo, para evitar saltos al activarlo. */
+/** Señal del SoC (CPU/GPU): más lenta que la de confort para no reaccionar a picos de un núcleo. */
 internal fun smoothHardware(state: ControlState, sample: ThermalSample, nowMs: Long): SmoothedSignal =
     smoothSignal(
         previous = state.smoothedHardwareTemp,
         previousTimeMs = state.lastHardwareSampleTimeMs,
-        raw = sample.hardwarePeakTemp,
+        raw = hardwareBase(sample),
         nowMs = nowMs,
         initialized = state.hasHardwareValue,
+        alpha = EMA_ALPHA_HARDWARE,
     )
 
 internal fun adaptiveInterval(
@@ -148,27 +246,8 @@ internal fun adaptiveInterval(
     }
 }
 
-/** Pico del SoC (CPU/GPU), nunca de batería, cargador o módem. */
-internal fun hardwarePeak(zones: Map<String, Float>): Float =
-    zones.asSequence().filter { (key, temp) ->
-        val normalized = key.lowercase()
-        temp in 0f..115f &&
-            (normalized.contains("cpu") || normalized.contains("tsens") ||
-                normalized.contains("gpu") || normalized.contains("kgsl") ||
-                normalized.contains("soc")) &&
-            !normalized.contains("skin") && !normalized.contains("case") &&
-            !normalized.contains("battery") && !normalized.contains("bms") &&
-            !normalized.contains("charger") && !normalized.contains("modem")
-    }.maxOfOrNull { it.value } ?: 0f
-
-internal fun aggregateThermalZones(readings: List<Pair<String, Float>>): Map<String, Float> {
-    val result = LinkedHashMap<String, Float>()
-    for ((type, temp) in readings) {
-        val existing = result[type]
-        if (existing == null || temp > existing) result[type] = temp
-    }
-    return result
-}
+private fun quantizeSpeed(speed: Int): Int =
+    (speed.coerceIn(0, 100) / SPEED_QUANTUM) * SPEED_QUANTUM
 
 private data class CriticalState(
     val active: Boolean,
@@ -190,11 +269,12 @@ private fun updateCritical(
         return CriticalState(state.criticalActive, state.hardwareRiskSinceMs, state.criticalClearSinceMs)
     }
 
-    val socHot = sample.hardwarePeakTemp >= ThermalLogic.TEMP_HOT ||
+    val socTemp = hardwareBase(sample)
+    val socHot = socTemp >= ThermalLogic.TEMP_HOT ||
         sample.thermalStatus >= ThermalLogic.THERMAL_STATUS_MODERATE
 
     if (state.criticalActive) {
-        val cooling = !socHot && sample.hardwarePeakTemp < ThermalLogic.CRITICAL_EXIT_TEMP
+        val cooling = !socHot && socTemp < ThermalLogic.CRITICAL_EXIT_TEMP
         val clearSince = when {
             !cooling -> 0L
             state.criticalClearSinceMs == 0L -> nowMs
@@ -223,34 +303,88 @@ internal fun decide(
     sample: ThermalSample,
     nowMs: Long,
     advance: Boolean,
+    tuning: ThermalTuning = ThermalTuning(),
 ): ThermalDecision {
     val critical = updateCritical(state, sample, nowMs, advance)
     val comfort = smooth(state, sample, nowMs)
     val hardware = smoothHardware(state, sample, nowMs)
 
-    // Una sola fuente activa: SoC cuando hay riesgo, confort en caso contrario.
-    // Ambas se han suavizado previamente, así que cambiar de fuente no produce un salto.
-    val control = if (critical.active && sample.hardwarePeakTemp > 0f) hardware else comfort
-    val maxTemp = control.value
-    val targetSpeed = targetSpeedFor(control.predicted)
+    val status = sample.thermalStatus.coerceIn(0, 6)
+    val riskConfirmed = critical.active || status >= ThermalLogic.THERMAL_STATUS_SEVERE
 
-    val current = state.lastRecommendedSpeed
-    val increment = if (critical.active) ThermalLogic.EMERGENCY_INCREMENT else ThermalLogic.SPEED_INCREMENT
-    val delayMs = if (targetSpeed >= current) {
-        if (critical.active) ThermalLogic.EMERGENCY_INCREASE_DELAY_MS else ThermalLogic.INCREASE_DELAY_MS
+    val chargingBias = if (sample.charging && sample.screenInteractive) ThermalLogic.CHARGING_BIAS_C else 0f
+    val screenFactor = if (sample.screenInteractive) 1f else ThermalLogic.SCREEN_OFF_SOC_FACTOR
+    val comfortValue = comfort.value + chargingBias
+    val comfortPredicted = comfort.predicted + chargingBias
+    val socValue = socEquivalentTemp(hardware.value) * screenFactor
+    val socPredicted = socEquivalentTemp(hardware.predicted) * screenFactor
+    val statusValue = statusEquivalentTemp(status)
+
+    val fusedPredicted = maxOf(comfortPredicted, socPredicted, statusValue)
+
+    // Con riesgo confirmado el SoC manda sin reescalar: es la señal de seguridad.
+    val demandTemp = if (riskConfirmed) maxOf(fusedPredicted, hardware.predicted) else fusedPredicted
+    val noisePreference = tuning.noisePreference.coerceIn(0, 100)
+    // 0 = rendimiento -> factor máximo (1.25); 100 = silencio -> factor mínimo (0.75).
+    val noiseFactor = ThermalLogic.NOISE_FACTOR_MIN +
+        ThermalLogic.NOISE_FACTOR_RANGE * ((100 - noisePreference) / 100f)
+    val curveDemand = targetSpeedFor(demandTemp)
+    // En emergencia la preferencia de ruido no puede recortar la refrigeración.
+    val adjustedDemand = if (riskConfirmed) {
+        curveDemand
     } else {
-        ThermalLogic.DECREASE_DELAY_MS
+        (curveDemand * noiseFactor).roundToInt().coerceIn(0, 100)
     }
+    val statusFloor = statusFloorSpeed(status)
+    val demand = maxOf(adjustedDemand, statusFloor)
+
+    val current = state.lastRecommendedSpeed.coerceIn(0, 100)
+    val emergency = riskConfirmed
+    // El suelo que impone el SO es seguridad: no se modula con la preferencia de
+    // ruido (en silencio +5/45s tardaría ~6 min en alcanzar un 40 % ya exigido).
+    val floorRising = !emergency && statusFloor > current
+    val quiet = noisePreference >= ThermalLogic.NOISE_QUIET_THRESHOLD
+    val performance = noisePreference <= ThermalLogic.NOISE_PERFORMANCE_THRESHOLD
+    val increment = when {
+        emergency -> ThermalLogic.EMERGENCY_INCREMENT
+        floorRising -> ThermalLogic.SPEED_INCREMENT
+        quiet -> ThermalLogic.QUIET_INCREMENT
+        performance -> ThermalLogic.PERFORMANCE_INCREMENT
+        else -> ThermalLogic.SPEED_INCREMENT
+    }
+    val upDelay = when {
+        emergency -> ThermalLogic.EMERGENCY_INCREASE_DELAY_MS
+        floorRising -> ThermalLogic.INCREASE_DELAY_MS
+        quiet -> ThermalLogic.QUIET_INCREASE_DELAY_MS
+        performance -> ThermalLogic.PERFORMANCE_INCREASE_DELAY_MS
+        else -> ThermalLogic.INCREASE_DELAY_MS
+    }
+    val downDelay = when {
+        emergency -> ThermalLogic.DECREASE_DELAY_MS
+        quiet -> ThermalLogic.QUIET_DECREASE_DELAY_MS
+        performance -> ThermalLogic.PERFORMANCE_DECREASE_DELAY_MS
+        else -> ThermalLogic.DECREASE_DELAY_MS
+    }
+    val elapsed = nowMs - state.lastSpeedChangeTimeMs
+    val rising = comfort.trendPerSecond > 0.05f || hardware.trendPerSecond > 0.05f
 
     var speed = current
-    val elapsed = nowMs - state.lastSpeedChangeTimeMs
-    if (targetSpeed > current && elapsed >= delayMs) {
-        speed = (current + increment).coerceAtMost(targetSpeed)
-    } else if (targetSpeed < current &&
-        (targetSpeed == 0 || current - targetSpeed > DOWN_DEADBAND_PERCENT) &&
-        elapsed >= delayMs
+    val wantsUp = demand > current
+    // Sin atajo cuando current == 0: tras una caída a 0, la subida respeta el dwell
+    // (en el arranco real lastSpeedChangeTimeMs = 0 y elapsed ya es grande).
+    val canUp = elapsed >= upDelay &&
+        (emergency || demand >= current + UP_DEADBAND_PERCENT)
+    if (wantsUp && canUp) {
+        speed = quantizeSpeed((current + increment).coerceAtMost(demand))
+    } else if (demand < current &&
+        elapsed >= downDelay &&
+        !rising &&
+        (demand == 0 || current - demand > DOWN_DEADBAND_PERCENT)
     ) {
-        speed = (current - ThermalLogic.SPEED_INCREMENT).coerceAtLeast(targetSpeed)
+        // La bajada usa SIEMPRE SPEED_INCREMENT (no el increment por zona de ruido):
+        // enfriar de más es seguro; recortarlo en silencio ahorraría poco y el riesgo
+        // de que la piel siga caliente con el ventilador bajo no compensa.
+        speed = quantizeSpeed((current - ThermalLogic.SPEED_INCREMENT).coerceAtLeast(demand))
     }
 
     val changed = speed != current
@@ -272,13 +406,24 @@ internal fun decide(
         state
     }
 
+    val maxTemp = maxOf(comfort.value, hardware.value, sample.batteryTemp.sanitizedTemp())
     val level = tempLevelForSignal(maxTemp)
+    val source = when {
+        riskConfirmed && hardware.predicted > 0f && hardware.predicted >= fusedPredicted -> "hardware"
+        statusValue > 0f && statusValue >= socValue && statusValue >= comfortValue -> "status"
+        socValue > 0f && socValue >= comfortValue -> "soc"
+        sample.skinTemp.sanitizedTemp() > 0f -> "skin"
+        sample.batteryTemp.sanitizedTemp() > 0f -> "battery"
+        else -> "none"
+    }
+
     return ThermalDecision(
         speed = speed,
         maxTemp = maxTemp,
         tempLevel = level,
         hardwarePeakTemp = sample.hardwarePeakTemp,
-        isRiskConfirmed = critical.active,
+        isRiskConfirmed = riskConfirmed,
+        controlSource = source,
         adaptiveIntervalMs = adaptiveInterval(level, sample.hardwarePeakTemp),
         state = nextState,
     )

@@ -9,6 +9,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
+import com.hitomatito.redmagicooler.data.ThermalZoneProfileRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +24,10 @@ import java.io.File
  *
  * Dueño de la lectura de sensores y del bucle; las decisiones puras viven en [ThermalLogic].
  */
-class ThermalMonitor(private val context: Context) {
+class ThermalMonitor(
+    private val context: Context,
+    private val noisePreferenceProvider: () -> Int = { 50 },
+) {
     companion object {
         private const val TAG = "ThermalMonitor"
 
@@ -43,9 +47,27 @@ class ThermalMonitor(private val context: Context) {
     private val stateLock = Any()
     private var controlState = ControlState()
 
+    private data class ThermalZoneEntry(val tempFile: File, val type: String)
+
     private val thermalZoneLock = Any()
-    private val thermalZoneCache = mutableMapOf<Int, Pair<File, File>>()
+    private val thermalZoneCache = mutableMapOf<Int, ThermalZoneEntry>()
     private var thermalCacheInitialized = false
+
+    @Volatile
+    private var zoneInventory = ""
+
+    private val zoneProfile: ThermalZoneProfile by lazy {
+        // También el repositorio aquí: getSharedPreferences lee disco y el monitor
+        // se construye en el onCreate del servicio (hilo principal).
+        val zoneProfileRepository = ThermalZoneProfileRepository(context)
+        val modelKey = ThermalZoneProfileRepository.currentModelKey()
+        val defaults = ThermalZoneDefaults.forModel(modelKey)
+        val saved = zoneProfileRepository.load(modelKey)
+        ThermalZoneProfile(
+            byIndex = defaults.byIndex + saved.byIndex,
+            byType = defaults.byType + saved.byType,
+        )
+    }
 
     data class ThermalData(
         val batteryTemp: Float = 0f,
@@ -59,6 +81,12 @@ class ThermalMonitor(private val context: Context) {
         val tempSources: String = "",
         val hardwarePeakTemp: Float = 0f,
         val intervalCount: Int = 0,
+        val charging: Boolean = false,
+        val screenInteractive: Boolean = true,
+        val controlSource: String = "",
+        val riskConfirmed: Boolean = false,
+        val zoneInventory: String = "",
+        val noisePreference: Int = 50,
     )
 
     enum class TempLevel {
@@ -120,33 +148,21 @@ class ThermalMonitor(private val context: Context) {
         return toThermalData(sample, decision, intervalCount)
     }
 
-    /** Intervalo adaptativo de sondeo, delegado a la lógica pura. */
-    fun getAdaptiveInterval(tempLevel: TempLevel, hardwarePeakTemp: Float = 0f): Long =
-        adaptiveInterval(tempLevel, hardwarePeakTemp)
-
     private fun evaluate(sample: ThermalSample, advance: Boolean): ThermalDecision =
         synchronized(stateLock) {
             val nowMs = SystemClock.elapsedRealtime()
-            val decision = decide(controlState, sample, nowMs, advance)
+            val tuning = ThermalTuning(noisePreferenceProvider())
+            val decision = decide(controlState, sample, nowMs, advance, tuning)
             if (advance) controlState = decision.state
             decision
         }
 
     private fun sampleSensors(): ThermalSample {
-        val batteryTemp = getBatteryTemperature()
-        val zoneTemps = readThermalZones()
-
-        val cpuTemp = zoneTemps["cpu"] ?: zoneTemps.entries
-            .filter { it.key.contains("cpu") || it.key.contains("tsens") }
-            .maxByOrNull { it.value }?.value ?: 0f
-
-        val gpuTemp = zoneTemps["gpu"] ?: zoneTemps.entries
-            .filter { it.key.contains("gpu") || it.key.contains("kgsl") }
-            .maxByOrNull { it.value }?.value ?: 0f
-
-        val skinTemp = zoneTemps["skin"] ?: zoneTemps["case"] ?:
-            zoneTemps.entries.filter { it.key.contains("skin") || it.key.contains("case") }
-                .maxByOrNull { it.value }?.value ?: 0f
+        val battery = readBatteryState()
+        val screenInteractive = powerManager?.isInteractive ?: true
+        val readings = readThermalZoneReadings()
+        val profile = zoneProfile
+        val roles = aggregateZoneRoles(readings, profile)
 
         val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             getThermalStatus()
@@ -154,25 +170,27 @@ class ThermalMonitor(private val context: Context) {
             0
         }
 
-        val otherZones = zoneTemps.filter { (key, _) ->
-            val normalized = key.lowercase()
-            !normalized.contains("cpu") && !normalized.contains("tsens") &&
-                !normalized.contains("gpu") && !normalized.contains("kgsl") &&
-                !normalized.contains("skin") && !normalized.contains("case")
+        val otherZones = readings.filter { reading ->
+            val role = resolveZoneRole(reading, profile)
+            role != ThermalZoneRole.CPU &&
+                role != ThermalZoneRole.GPU &&
+                role != ThermalZoneRole.SKIN
         }
         val otherZonesText = if (otherZones.isEmpty()) {
             ""
         } else {
-            ", Otros: ${otherZones.entries.joinToString { "${it.key}=${"%.1f".format(it.value)}" }}"
+            ", Otros: ${otherZones.joinToString { "${it.type}=${"%.1f".format(it.tempC)}" }}"
         }
 
         return ThermalSample(
-            batteryTemp = batteryTemp,
-            cpuTemp = cpuTemp,
-            gpuTemp = gpuTemp,
-            skinTemp = skinTemp,
-            hardwarePeakTemp = hardwarePeak(zoneTemps),
+            batteryTemp = battery.temperature,
+            cpuTemp = roles[ThermalZoneRole.CPU] ?: 0f,
+            gpuTemp = roles[ThermalZoneRole.GPU] ?: 0f,
+            skinTemp = roles[ThermalZoneRole.SKIN] ?: 0f,
+            hardwarePeakTemp = hardwarePeakForRoles(roles),
             thermalStatus = thermalStatus,
+            charging = battery.charging,
+            screenInteractive = screenInteractive,
             otherZonesText = otherZonesText,
         )
     }
@@ -187,14 +205,10 @@ class ThermalMonitor(private val context: Context) {
             if (sample.cpuTemp > 0) append(", CPU: ${"%.1f".format(sample.cpuTemp)}°C")
             if (sample.gpuTemp > 0) append(", GPU: ${"%.1f".format(sample.gpuTemp)}°C")
             if (sample.skinTemp > 0) append(", Skin: ${"%.1f".format(sample.skinTemp)}°C")
-            val controlLabel = when {
-                decision.isRiskConfirmed -> "hardware"
-                sample.skinTemp > 0f -> "skin"
-                sample.batteryTemp > 0f -> "battery"
-                else -> "none"
-            }
             val riskLabel = if (decision.isRiskConfirmed) ", risk" else ""
-            append(", Control: ${"%.1f".format(decision.maxTemp)}°C ($controlLabel$riskLabel)")
+            append(", Control: ${"%.1f".format(decision.maxTemp)}°C (${decision.controlSource}$riskLabel)")
+            if (sample.charging) append(", Carga: sí")
+            append(", Pantalla: ${if (sample.screenInteractive) "on" else "off"}")
             append(sample.otherZonesText)
         }
 
@@ -210,46 +224,56 @@ class ThermalMonitor(private val context: Context) {
             tempSources = sources,
             hardwarePeakTemp = sample.hardwarePeakTemp,
             intervalCount = intervalCount,
+            charging = sample.charging,
+            screenInteractive = sample.screenInteractive,
+            controlSource = decision.controlSource,
+            riskConfirmed = decision.isRiskConfirmed,
+            zoneInventory = zoneInventory,
+            noisePreference = noisePreferenceProvider().coerceIn(0, 100),
         )
     }
 
-    /** Obtiene la temperatura de la batería. */
-    private fun getBatteryTemperature(): Float {
+    private data class BatteryState(val temperature: Float, val charging: Boolean)
+
+    /** Temperatura y estado de carga en una sola lectura del sticky broadcast. */
+    private fun readBatteryState(): BatteryState {
         return try {
             val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            val temp = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
-            temp / 10.0f
+            val temp = (intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10.0f
+            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val plugged = intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+            val charging = plugged != 0 ||
+                status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+            BatteryState(temp, charging)
         } catch (e: Exception) {
-            Log.e(TAG, "Error obteniendo temperatura de batería: ${e.message}")
-            0f
+            Log.e(TAG, "Error leyendo estado de batería: ${e.message}")
+            BatteryState(0f, false)
         }
     }
 
-    /** Lee las zonas térmicas del sistema (ruta cacheada en el primer uso). */
-    private fun readThermalZones(): Map<String, Float> {
-        val cachedFiles = synchronized(thermalZoneLock) {
+    /** Lee las zonas térmicas del sistema (ruta y tipo cacheados en el primer uso). */
+    private fun readThermalZoneReadings(): List<ThermalZoneReading> {
+        val cached = synchronized(thermalZoneLock) {
             if (!thermalCacheInitialized) initThermalCache()
-            thermalZoneCache.values.toList()
+            thermalZoneCache.entries.map { it.key to it.value }
         }
 
-        val readings = mutableListOf<Pair<String, Float>>()
-        for ((tempFile, typeFile) in cachedFiles) {
+        val readings = mutableListOf<ThermalZoneReading>()
+        for ((index, entry) in cached) {
             try {
-                val temp = tempFile.readText().trim().toFloatOrNull()
-                val type = typeFile.readText().trim().lowercase()
-
-                if (temp != null && temp > 0) {
-                    val normalizedTemp = if (temp > 200) temp / 1000f else temp
-                    if (normalizedTemp in 0f..100f) {
-                        readings.add(type to normalizedTemp)
-                    }
+                val raw = entry.tempFile.readText().trim().toFloatOrNull() ?: continue
+                if (raw <= 0f) continue
+                val temp = if (raw > 200f) raw / 1000f else raw
+                if (isPlausibleZoneTemp(temp)) {
+                    readings.add(ThermalZoneReading(index, entry.type, temp))
                 }
             } catch (_: Exception) {
                 // Una zona ilegible no invalida las demás.
             }
         }
 
-        return aggregateThermalZones(readings)
+        return readings
     }
 
     /** Inicializa la caché de zonas térmicas válidas (una sola vez). */
@@ -259,7 +283,10 @@ class ThermalMonitor(private val context: Context) {
             val typeFile = File("/sys/class/thermal/thermal_zone$i/type")
             try {
                 if (tempFile.exists() && tempFile.canRead() && typeFile.exists() && typeFile.canRead()) {
-                    thermalZoneCache[i] = tempFile to typeFile
+                    val type = typeFile.readText().trim().lowercase()
+                    if (type.isNotEmpty()) {
+                        thermalZoneCache[i] = ThermalZoneEntry(tempFile, type)
+                    }
                 }
             } catch (_: Exception) {
                 // Ignorar zonas inaccesibles.
@@ -267,7 +294,12 @@ class ThermalMonitor(private val context: Context) {
         }
 
         thermalCacheInitialized = true
+        zoneInventory = zoneInventoryText(
+            thermalZoneCache.mapValues { it.value.type },
+            zoneProfile,
+        )
         Log.d(TAG, "Caché térmico inicializado: ${thermalZoneCache.size} zonas válidas encontradas")
+        Log.d(TAG, "Zonas: $zoneInventory")
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)

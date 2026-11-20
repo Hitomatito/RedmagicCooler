@@ -114,7 +114,9 @@ The release APK is written to `app/build/outputs/apk/release/`.
 
 ### Automatic mode
 
-Automatic mode reads the phone's battery and system thermal sensors, maps the highest available temperature to a recommended fan speed, and ramps the cooler up or down with minimum step and dwell-time guards to avoid rapid oscillation. Temperatures at or above the critical threshold jump directly to maximum speed. Manual fan control is disabled while automatic mode is active.
+Automatic mode fuses several thermal sources instead of trusting a single reading: skin/battery comfort temperature, SoC (CPU/GPU) temperature rescaled to the comfort scale, and Android's system thermal status (0–6), with charging and screen state as context. It maps the fused temperature to a recommended fan speed and ramps the cooler up or down with minimum step and dwell-time guards to avoid rapid oscillation. A confirmed critical state still overrides the fusion and jumps toward maximum speed.
+
+Each profile offers a **noise preference** in automatic mode — *Rendimiento* (25), *Equilibrado* (50, default) or *Silencio* (75), stored as a 0–100 value. It scales the fan curve and tunes the ramp steps and dwell times: quieter settings hold lower speeds longer before ramping up, performance settings react faster and cool harder. Safety is never traded away — confirmed critical risk ignores the preference, and the OS thermal status always imposes a minimum speed. Manual fan control is disabled while automatic mode is active.
 
 ## Permissions
 
@@ -143,7 +145,7 @@ The app uses the RedMagic advertising service and the cooler's fan service:
 | RedMagic advertising service | `00004a41-0000-1000-8000-00805f9b34fb` |
 | Fan service | `d52082ad-e805-9f97-9d4e-1c682d9c9ce6` |
 | Fan speed characteristic | `00001012-0000-1000-8000-00805f9b34fb` |
-| Temperature notifications | `00001015-0000-1000-8000-00805f9b34fb` |
+| Status notifications (multiplexed frames; mode byte `4` carries cooler temperature) | `00001015-0000-1000-8000-00805f9b34fb` |
 | RGB control | `00001013-0000-1000-8000-00805f9b34fb` |
 | Automatic mode control | `00001018-0000-1000-8000-00805f9b34fb` |
 
@@ -160,7 +162,7 @@ Fan speed is sent as a raw value between `40` and `80`, mapped from the UI's `0�
 | --- | --- |
 | `MainActivity` | Compose host and navigation; observes the BLE engine and issues commands. |
 | `CoolerService` | Foreground service for automatic mode: notifications, thermal loop, and BLE commands via the shared engine. |
-| `ThermalMonitor` | Battery and system thermal sensors, temperature levels, and recommended fan speed. |
+| `ThermalMonitor` / `ThermalLogic` | System thermal zones classified by role (CPU/GPU/skin), battery, charging and screen state, plus the pure-Kotlin speed decision engine with noise-preference tuning. |
 | `ProfileRepository` | Local profile storage using SharedPreferences and JSON. Profiles are managed independently; no separate active-profile id is persisted. |
 | `ui/` | Home, Add device, Profile, and RGB screens with a Material 3 theme. |
 | `model/` | BLE constants, profiles, and RGB configuration. |

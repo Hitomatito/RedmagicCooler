@@ -1,17 +1,16 @@
 package com.hitomatito.redmagicooler.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,7 +23,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Warning
@@ -67,6 +65,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
@@ -95,6 +95,7 @@ fun ProfileConfigScreen(
     onNavigateToRGB: () -> Unit,
     onSetFanSpeed: (Int) -> Unit,
     onToggleAutoMode: () -> Unit,
+    onNoisePreferenceChange: (Int) -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onDeleteProfile: () -> Unit,
@@ -104,6 +105,10 @@ fun ProfileConfigScreen(
     onDismissError: () -> Unit = {}
 ) {
     var fanSpeed by remember(profile.fanSpeed) { mutableIntStateOf(profile.fanSpeed) }
+    // Contador de solicitudes explícitas (chip/toque en pista): garantiza que
+    // re-pedir la misma velocidad vuelva a escribir en el cooler aunque el
+    // debounce no se reinicie porque fanSpeed no cambió.
+    var speedRequest by remember { mutableIntStateOf(0) }
     var isDragging by remember { mutableStateOf(false) }
     var isApplying by remember { mutableStateOf(false) }
     // Velocidad elegida por el usuario todavía no confirmada por el cooler.
@@ -113,7 +118,6 @@ fun ProfileConfigScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf(profile.name) }
     val scrollState = rememberScrollState()
-    val reduceMotion = rememberReduceMotion()
 
     // Reflejar la velocidad que reporta el cooler solo cuando coincide con el
     // último valor enviado (o no hay ninguno pendiente). Las lecturas tardías
@@ -137,7 +141,7 @@ fun ProfileConfigScreen(
     }
 
     // Aplicación automática con debounce
-    LaunchedEffect(fanSpeed, profile.isConnected, profile.isAutoMode) {
+    LaunchedEffect(fanSpeed, speedRequest, profile.isConnected, profile.isAutoMode) {
         if (profile.isConnected && !profile.isAutoMode) {
             isApplying = true
             try {
@@ -275,14 +279,6 @@ fun ProfileConfigScreen(
                 )
             }
 
-            AnimatedVisibility(
-                visible = profile.isAutoMode,
-                enter = if (reduceMotion) fadeIn() else slideInVertically { -it } + fadeIn(),
-                exit = if (reduceMotion) fadeOut() else slideOutVertically { -it } + fadeOut()
-            ) {
-                AutoModeBanner(onDisable = onToggleAutoMode)
-            }
-
             // Imagen del modelo y estado de conexión
             ProfileHeroCard(
                 profile = profile,
@@ -308,6 +304,11 @@ fun ProfileConfigScreen(
                 onToggleAutoMode = onToggleAutoMode
             )
 
+            NoisePreferenceCard(
+                value = profile.noisePreference,
+                onCommit = { onNoisePreferenceChange(it) },
+            )
+
             // Control de velocidad (solo si está conectado)
             if (profile.isConnected) {
                 SpeedControlCard(
@@ -318,64 +319,13 @@ fun ProfileConfigScreen(
                         pendingUserSpeed = it
                         fanSpeed = it
                     },
-                    onSetSpeed = {
-                        pendingUserSpeed = it
-                        onSetFanSpeed(it)
-                    },
+                    onApplySpeed = { speedRequest++ },
                     onDraggingChange = { isDragging = it }
                 )
             }
 
             // Información del perfil
             ProfileInfoCard(profile = profile)
-        }
-    }
-}
-
-/**
- * Superficie dedicada al modo automático con acceso directo para desactivarlo.
- */
-@Composable
-private fun AutoModeBanner(
-    onDisable: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Check,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Modo automático activo",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
-                )
-                Text(
-                    text = "El servicio ajusta la velocidad entre ${ThermalLogic.TEMP_SAFE} y " +
-                        "${ThermalLogic.TEMP_CRITICAL} °C aunque cierres la app.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
-                )
-            }
-            FilledTonalButton(onClick = onDisable) {
-                Text("Desactivar")
-            }
         }
     }
 }
@@ -752,6 +702,75 @@ private fun ThermalCard(
 }
 
 /**
+ * Ajuste del equilibrio entre ruido y refrigeración en modo automático.
+ * Solo presets: cada zona tiene sus propias constantes de curva y rampa.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun NoisePreferenceCard(
+    value: Int,
+    onCommit: (Int) -> Unit,
+) {
+    val label = when {
+        value <= ThermalLogic.NOISE_PERFORMANCE_THRESHOLD -> "Rendimiento"
+        value >= ThermalLogic.NOISE_QUIET_THRESHOLD -> "Silencio"
+        else -> "Equilibrado"
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Preferencia de ruido",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Equilibrio entre silencio y refrigeración en modo automático",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(25 to "Rendimiento", 50 to "Equilibrado", 75 to "Silencio").forEach { (preset, name) ->
+                    FilterChip(
+                        selected = label == name,
+                        onClick = { onCommit(preset) },
+                        label = { Text(name) },
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * Control de velocidad manual con presets rápidos.
  */
 @Composable
@@ -760,7 +779,7 @@ private fun SpeedControlCard(
     isAutoMode: Boolean,
     isApplying: Boolean,
     onSpeedChange: (Int) -> Unit,
-    onSetSpeed: (Int) -> Unit,
+    onApplySpeed: () -> Unit,
     onDraggingChange: (Boolean) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
@@ -829,6 +848,11 @@ private fun SpeedControlCard(
             }
 
             Slider(
+                modifier = Modifier.sliderTapSeek(0f..100f, enabled = !isAutoMode) { v ->
+                    onSpeedChange(v.toInt())
+                    onApplySpeed()
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                },
                 value = fanSpeed.toFloat(),
                 onValueChange = {
                     onDraggingChange(true)
@@ -851,7 +875,7 @@ private fun SpeedControlCard(
                         selected = fanSpeed == preset,
                         onClick = {
                             onSpeedChange(preset)
-                            onSetSpeed(preset)
+                            onApplySpeed()
                         },
                         label = { Text("$preset%") },
                         enabled = !isAutoMode,
@@ -975,6 +999,41 @@ private fun ConnectionErrorBanner(
                     color = MaterialTheme.colorScheme.onErrorContainer
                 )
             }
+        }
+    }
+}
+
+/**
+ * El Slider de Material 3 solo responde al arrastre: un toque en la pista no
+ * mueve la manija, y además consume el UP, lo que inutiliza un
+ * detectTapGestures normal. Este lazo observa toda la secuencia sin consumir:
+ * si el dedo no superó el touch slop, el toque fija el valor en la X pulsada.
+ * El padding lateral aproxima la geometría de la pista del slider.
+ */
+private fun Modifier.sliderTapSeek(
+    valueRange: ClosedFloatingPointRange<Float>,
+    enabled: Boolean = true,
+    onSeek: (Float) -> Unit,
+): Modifier = pointerInput(enabled, valueRange.start, valueRange.endInclusive) {
+    if (!enabled) return@pointerInput
+    val sidePad = 20.dp.toPx()
+    val slop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var moved = false
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Main)
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            val dx = change.position.x - down.position.x
+            val dy = change.position.y - down.position.y
+            if (dx * dx + dy * dy > slop * slop) moved = true
+            if (!change.pressed) break
+        }
+        if (!moved) {
+            val usable = (size.width - 2f * sidePad).coerceAtLeast(1f)
+            val fraction = ((down.position.x - sidePad) / usable).coerceIn(0f, 1f)
+            val span = valueRange.endInclusive - valueRange.start
+            onSeek(valueRange.start + fraction * span)
         }
     }
 }

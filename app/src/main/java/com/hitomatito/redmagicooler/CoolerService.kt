@@ -20,6 +20,7 @@ import com.hitomatito.redmagicooler.model.CoolerProfile
 import com.hitomatito.redmagicooler.model.LightEffect
 import com.hitomatito.redmagicooler.model.RGBConfig
 import com.hitomatito.redmagicooler.data.ProfileRepository
+import com.hitomatito.redmagicooler.data.ThermalTelemetry
 import com.hitomatito.redmagicooler.ble.CoolerBleManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,16 +65,11 @@ class CoolerService : Service() {
         // Métricas de batería
         private const val KEY_BATTERY_START = "battery_start_level"
         private const val KEY_BATTERY_START_TIME = "battery_start_time"
-        
-        // Instancia estática para acceso desde MainActivity (control RGB en modo auto)
-        @Volatile
-        private var instance: CoolerService? = null
-        
-        fun getInstance(): CoolerService? = instance
     }
     
     private var thermalDataCollectionJob: Job? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val thermalTelemetry by lazy { ThermalTelemetry(this) }
     // La conexión GATT y la detección viven en CoolerBleManager (propietario único).
     // El servicio actúa como cliente: observa eventos y emite comandos.
     private val isConnected: Boolean
@@ -95,7 +91,6 @@ class CoolerService : Service() {
     
     override fun onCreate() {
         super.onCreate()
-        instance = this // Guardar instancia para acceso externo
         logDebug("Servicio creado")
         
         // Inicializar métricas de batería
@@ -115,8 +110,10 @@ class CoolerService : Service() {
         
         // Monitor térmico único compartido con la actividad
         ThermalMonitorManager.initialize(this)
+        ThermalMonitorManager.setNoisePreference(activeProfile?.noisePreference ?: 50)
         CoolerBleManager.init(this)
         observeBleEvents()
+        observeNoisePreference()
         
         // CRÍTICO: Solo conectar si hay un perfil configurado
         if (activeProfile != null) {
@@ -176,6 +173,28 @@ class CoolerService : Service() {
         }
     }
 
+    /** Mantiene sincronizada la preferencia de ruido del perfil activo. */
+    private fun observeNoisePreference() {
+        serviceScope.launch {
+            ProfileRepository.getInstance(this@CoolerService).profiles.collect { profiles ->
+                val active = activeProfile ?: return@collect
+                val stored = profiles.find { it.id == active.id }
+                    // Perfiles sintéticos (prefs legacy sin PROFILE_ID): emparejar por MAC.
+                    ?: profiles.find { it.macAddress.isNotBlank() && it.macAddress == active.macAddress }
+                    ?: return@collect
+                // Solo se sincroniza el monitor: activeProfile se construye con el
+                // valor almacenado y escribirlo aquí competiría con el hilo principal.
+                ThermalMonitorManager.setNoisePreference(stored.noisePreference)
+            }
+        }
+    }
+
+    /** Preferencia guardada del perfil; 50 si aún no existe. */
+    private fun storedNoisePreference(profileId: String?): Int =
+        profileId?.let {
+            ProfileRepository.getInstance(this).getProfile(it)?.noisePreference
+        } ?: 50
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_AUTO -> {
@@ -200,10 +219,12 @@ class CoolerService : Service() {
                             deviceType = deviceType,
                             macAddress = deviceMac,
                             isConnected = false,
-                            isAutoMode = true
+                            isAutoMode = true,
+                            noisePreference = storedNoisePreference(profileId)
                         )
 
                         logDebug("Modo automatico iniciado con perfil: ${activeProfile?.displayName}")
+                        ThermalMonitorManager.setNoisePreference(activeProfile?.noisePreference ?: 50)
 
                         // Guardar preferencia
                         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -321,10 +342,12 @@ class CoolerService : Service() {
                             deviceType = deviceType,
                             macAddress = deviceMac,
                             isConnected = false,
-                            isAutoMode = true
+                            isAutoMode = true,
+                            noisePreference = storedNoisePreference(profileId)
                         )
 
                         logDebug("Perfil activo configurado: ${activeProfile?.displayName}")
+                        ThermalMonitorManager.setNoisePreference(activeProfile?.noisePreference ?: 50)
 
                         // Guardar preferencia
                         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -354,7 +377,6 @@ class CoolerService : Service() {
     
     override fun onDestroy() {
         super.onDestroy()
-        instance = null // Limpiar instancia
         logDebug("Servicio destruido")
         
         // Mostrar métricas finales de batería
@@ -684,7 +706,8 @@ class CoolerService : Service() {
                 lastLoggedRecommendedSpeed = data.recommendedSpeed
             }
             currentTemp = data.maxTemp
-            
+            thermalTelemetry.logSample(data, currentSpeed)
+
             if (CoolerBleManager.isHealthy()) {
                 val currentTime = System.currentTimeMillis()
                 
@@ -819,7 +842,8 @@ class CoolerService : Service() {
                         deviceType = deviceType,
                         macAddress = deviceMac,
                         isConnected = false,
-                        isAutoMode = true
+                        isAutoMode = true,
+                        noisePreference = storedNoisePreference(profileId)
                     )
                 }
             }
