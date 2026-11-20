@@ -5,8 +5,12 @@
 <h1 align="center">RedmagicCooler</h1>
 
 <p align="center">
-  <strong>Unofficial Android control for RedMagic magnetic coolers over Bluetooth LE.</strong><br>
+  Control RedMagic / Nubia magnetic phone coolers from Android over Bluetooth LE.<br>
   Fan speed, automatic thermal mode, RGB lighting, and multiple cooler profiles — all handled locally on your phone.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Hitomatito/RedmagicCooler/releases/latest"><strong>Download the latest APK</strong></a>
 </p>
 
 <p align="center">
@@ -23,25 +27,31 @@
   <img src="https://img.shields.io/badge/Kotlin-2.4.21-7F52FF?logo=kotlin&logoColor=white" alt="Kotlin 2.4.21">
 </p>
 
-RedmagicCooler is a community-built Android client for RedMagic / Nubia magnetic coolers. It talks directly to the cooler over Bluetooth LE, so you can control the fan, enable automatic thermal regulation, and change the RGB lighting without the official app.
-
-> [!NOTE]
-> This project is not affiliated with, endorsed by, or supported by Nubia, RedMagic, or ZTE.
+<table align="center">
+  <tr>
+    <td align="center"><img src="docs/screenshots/auto-mode.png" width="230" alt="Automatic thermal mode with live temperature monitoring"></td>
+    <td align="center"><img src="docs/screenshots/fan-control.png" width="230" alt="Manual fan slider with speed presets"></td>
+    <td align="center"><img src="docs/screenshots/rgb-control.png" width="230" alt="RGB lighting control with effects and color picker"></td>
+  </tr>
+  <tr>
+    <td align="center"><em>Automatic thermal mode</em></td>
+    <td align="center"><em>Manual fan control</em></td>
+    <td align="center"><em>RGB lighting</em></td>
+  </tr>
+</table>
 
 ## Features
 
 - **Manual fan control** — 0–100% slider with 0%, 50%, and 100% presets.
-- **Automatic thermal mode** — monitors battery and system thermal sensors and adjusts fan speed in progressive steps with dwell-time and minimum-step guards.
-- **RGB lighting** — rainbow, multi-color breathing, single-color breathing, solid color, and off, with an RGB color picker.
-- **Foreground service for automatic mode** — thermal monitoring and fan adjustments continue in the background, with a persistent notification and controls.
+- **Automatic thermal mode** — monitors battery and system thermal sensors and drives the fan in the background with a foreground service.
+- **Noise preference** — balance between silence and cooling in automatic mode.
+- **RGB lighting** — rainbow, breathing, solid color, and off, with a color picker.
+- **Multiple cooler profiles** — save, rename, and switch between coolers.
 - **Automatic reconnect** — retries with backoff after a dropped BLE connection.
-- **Multiple cooler profiles** — save, rename, delete, and switch between coolers. One cooler is controlled at a time.
-- **Material You** — dynamic color on Android 12+, edge-to-edge Compose UI, and a branded splash screen.
-- **Local-first** — no internet permission, no accounts, and no telemetry. Profiles stay on the device.
+- **Material You** — dynamic color on Android 12+, edge-to-edge Compose UI.
+- **Local-first** — no internet permission, no accounts, no telemetry.
 
 ## Supported devices
-
-The app matches each cooler by its manufacturer data in the BLE scan record, with BLE-name matching used to disambiguate models. Choose your model in the app, then scan.
 
 | Generation | Model | Compatibility |
 | :---: | --- | --- |
@@ -56,157 +66,112 @@ The app matches each cooler by its manufacturer data in the BLE scan record, wit
 | 6 | Heat Sink 6 Pro+ | Supported by UUID |
 
 > [!IMPORTANT]
-> Only the **Heat Sink 5 Pro** has been tested on real hardware. The other models use their advertised UUIDs but have not been verified by the maintainer. If your model behaves differently, open an issue with a Logcat capture.
+> Only the **Heat Sink 5 Pro** has been tested on real hardware. If your model behaves differently, open an issue with a Logcat capture.
 
-## Installation
-
-### Install the APK
-
-1. Download the latest APK from [Releases](https://github.com/Hitomatito/RedmagicCooler/releases/latest).
-2. Allow installation from unknown sources if Android asks.
-3. Install and open the app.
-
-### Build from source
-
-Requirements:
-
-| Tool | Version |
-| --- | --- |
-| JDK | 21 |
-| Android SDK Platform | 37 |
-| Android Build Tools | 36.0.0 |
-| Gradle | 9.9.1 (wrapper) |
-
-If `java` is not on your `PATH`, `./gradlew` fails with `JAVA_HOME is not set`. Export a JDK 21 first, for example:
-
-```bash
-export JAVA_HOME=/path/to/jdk-21
-```
-
-```bash
-git clone https://github.com/Hitomatito/RedmagicCooler.git
-cd RedmagicCooler
-./gradlew assembleDebug
-```
-
-The debug APK is written to `app/build/outputs/apk/debug/`.
-
-For a signed release build, create a `keystore.properties` file in the project root. It is gitignored and must never be committed:
-
-```properties
-storeFile=/absolute/path/to/release.jks
-storePassword=...
-keyAlias=...
-keyPassword=...
-```
-
-Then run:
-
-```bash
-./gradlew assembleRelease
-```
-
-The release APK is written to `app/build/outputs/apk/release/`.
-
-## Usage
+<details>
+<summary><strong>Usage</strong></summary>
 
 1. Power on the cooler and keep it near the phone.
 2. Open the app and grant the requested Bluetooth, location, and notification permissions.
 3. Tap the add button, choose your cooler model, and scan.
-4. Select the cooler and connect.
-5. Use the fan slider or the 0/50/100 presets, enable automatic mode for thermal control, or open the RGB screen to choose an effect and color.
-6. When automatic mode is active, a foreground service keeps thermal monitoring alive in the background. Use the notification actions to switch between automatic and manual mode or to reconnect.
-7. Add more profiles for other coolers. The app stores each profile separately and connects to one cooler at a time.
+4. Use the fan slider or the 0/50/100 presets, enable automatic mode for thermal control, or open the RGB screen.
+5. While automatic mode is active, a foreground service keeps monitoring in the background with notification controls.
 
-### Automatic mode
+</details>
+
+<details>
+<summary><strong>How automatic mode works</strong></summary>
 
 Automatic mode fuses several thermal sources instead of trusting a single reading: skin/battery comfort temperature, SoC (CPU/GPU) temperature rescaled to the comfort scale, and Android's system thermal status (0–6), with charging and screen state as context. It maps the fused temperature to a recommended fan speed and ramps the cooler up or down with minimum step and dwell-time guards to avoid rapid oscillation. A confirmed critical state still overrides the fusion and jumps toward maximum speed.
 
-Each profile offers a **noise preference** in automatic mode — *Rendimiento* (25), *Equilibrado* (50, default) or *Silencio* (75), stored as a 0–100 value. It scales the fan curve and tunes the ramp steps and dwell times: quieter settings hold lower speeds longer before ramping up, performance settings react faster and cool harder. Safety is never traded away — confirmed critical risk ignores the preference, and the OS thermal status always imposes a minimum speed. Manual fan control is disabled while automatic mode is active.
+Each profile offers a **noise preference** in automatic mode — *Rendimiento* (25), *Equilibrado* (50, default), or *Silencio* (75). It scales the fan curve and tunes the ramp steps and dwell times. Safety is never traded away: confirmed critical risk ignores the preference, and the OS thermal status always imposes a minimum speed.
 
-## Permissions
+</details>
+
+<details>
+<summary><strong>Permissions</strong></summary>
 
 | Permission | Why it is requested |
 | --- | --- |
 | `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE` (Android 12+) | Discover, connect to, and control the cooler. |
 | `BLUETOOTH`, `BLUETOOTH_ADMIN` (Android 11 and below) | Legacy Bluetooth LE access. |
-| `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION` | Required by Android's BLE scanning APIs, especially on Android 11 and below. The app does not use your location for anything else. |
+| `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION` | Required by Android's BLE scanning APIs. The app does not use your location for anything else. |
 | `POST_NOTIFICATIONS` (Android 13+) | Show the foreground-service notification and its controls. |
 | `SCHEDULE_EXACT_ALARM` (Android 12+) | Reserved for future scheduled automation; not required for manual or automatic mode. |
 
-> [!NOTE]
-> The app declares no `INTERNET` permission. Cooler data and profiles stay on the device; nothing is uploaded to a server.
+The app declares no `INTERNET` permission. Cooler data and profiles stay on the device.
 
-## How it works
-
-The BLE protocol was reverse-engineered from Logcat captures of the official Nubia app. There is no public specification for these coolers.
-
-The app uses the RedMagic advertising service and the cooler's fan service:
+</details>
 
 <details>
-<summary>BLE service and characteristic UUIDs</summary>
+<summary><strong>How it works (BLE protocol)</strong></summary>
+
+The BLE protocol was reverse-engineered from Logcat captures of the official Nubia app; there is no public specification. The app uses the RedMagic advertising service and the cooler's fan service:
 
 | Purpose | UUID |
 | --- | --- |
 | RedMagic advertising service | `00004a41-0000-1000-8000-00805f9b34fb` |
 | Fan service | `d52082ad-e805-9f97-9d4e-1c682d9c9ce6` |
 | Fan speed characteristic | `00001012-0000-1000-8000-00805f9b34fb` |
-| Status notifications (multiplexed frames; mode byte `4` carries cooler temperature) | `00001015-0000-1000-8000-00805f9b34fb` |
+| Status notifications (multiplexed frames) | `00001015-0000-1000-8000-00805f9b34fb` |
 | RGB control | `00001013-0000-1000-8000-00805f9b34fb` |
 | Automatic mode control | `00001018-0000-1000-8000-00805f9b34fb` |
 
-Fan speed is sent as a raw value between `40` and `80`, mapped from the UI's `0–100%` range. The full list of model-specific manufacturer subtypes lives in [`CoolerDeviceType.kt`](app/src/main/java/com/hitomatito/redmagicooler/CoolerDeviceType.kt).
-
-</details>
+Fan speed is sent as a raw value between `40` and `80`, mapped from the UI's 0–100% range. The full list of model-specific manufacturer subtypes lives in [`CoolerDeviceType.kt`](app/src/main/java/com/hitomatito/redmagicooler/CoolerDeviceType.kt).
 
 > [!WARNING]
 > Firmware updates can change UUIDs or packet formats. If a cooler stops responding after an update, capture a Logcat and open an issue with the model and phone details.
 
-## Architecture
+</details>
+
+<details>
+<summary><strong>Architecture</strong></summary>
 
 | Component | Responsibility |
 | --- | --- |
 | `MainActivity` | Compose host and navigation; observes the BLE engine and issues commands. |
 | `CoolerService` | Foreground service for automatic mode: notifications, thermal loop, and BLE commands via the shared engine. |
 | `ThermalMonitor` / `ThermalLogic` | System thermal zones classified by role (CPU/GPU/skin), battery, charging and screen state, plus the pure-Kotlin speed decision engine with noise-preference tuning. |
-| `ProfileRepository` | Local profile storage using SharedPreferences and JSON. Profiles are managed independently; no separate active-profile id is persisted. |
-| `ui/` | Home, Add device, Profile, and RGB screens with a Material 3 theme. |
-| `model/` | BLE constants, profiles, and RGB configuration. |
+| `ProfileRepository` | Local profile storage using SharedPreferences and JSON. |
 | `ble/` | Single GATT owner and op queue. |
 
-**Stack:** Kotlin 2.4.21, Jetpack Compose, Material 3, Coroutines/Flow, Navigation Compose, WorkManager, and Android BLE GATT. The app targets Android 17 (API 37) and supports Android 7.0 (API 24) and newer.
+**Stack:** Kotlin 2.4.21, Jetpack Compose, Material 3, Coroutines/Flow, Navigation Compose, WorkManager, and Android BLE GATT. Targets Android 17 (API 37), supports Android 7.0 (API 24) and newer.
 
-## Development
+</details>
 
-Run the unit tests and build the app:
+## Build from source
+
+Requirements: JDK 21, Android SDK Platform 37, Build Tools 36.0.0, Gradle 9.9.1 (wrapper). If `java` is not on your `PATH`, export `JAVA_HOME` pointing to a JDK 21 before running `./gradlew`.
 
 ```bash
-./gradlew testDebugUnitTest
-./gradlew assembleDebug
-./gradlew assembleRelease
+git clone https://github.com/Hitomatito/RedmagicCooler.git
+cd RedmagicCooler
+./gradlew assembleDebug        # debug APK in app/build/outputs/apk/debug/
+./gradlew testDebugUnitTest    # unit tests
 ```
 
-GitHub Actions runs the unit-test task and builds debug and release variants with R8 and resource shrinking on every push to `main` and on pull requests.
+For a signed release build, create a gitignored `keystore.properties` in the project root (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`), then run `./gradlew assembleRelease`.
 
-Pull requests are welcome. For BLE issues, include the cooler model, phone model, Android version, and a Logcat capture. The reverse-engineered protocol is the most likely source of model-specific bugs.
+GitHub Actions runs the unit tests and builds debug and release variants on every push to `main` and on pull requests.
 
-## Troubleshooting
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
-### The cooler is not detected
+**The cooler is not detected**
 
 - Make sure the cooler is powered on and not connected to another phone.
-- Confirm that Bluetooth is enabled and the app has the required nearby-devices and location permissions.
+- Confirm Bluetooth is enabled and the app has the required nearby-devices and location permissions.
 - Toggle Bluetooth off and on, then scan again.
 
-### The connection drops after about 30 seconds
+**The connection drops after about 30 seconds**
 
-Some coolers stop answering GATT service discovery after a disconnect. The BLE link is established, but the cooler does not respond to ATT requests and Android terminates the connection with `status 22` after roughly 30 seconds. The official Nubia app shows the same behavior, so this is a cooler firmware or phone Bluetooth-stack limitation rather than an app bug.
+Some coolers stop answering GATT service discovery after a disconnect: Android terminates the link with `status 22`. The official Nubia app shows the same behavior, so this is a cooler firmware or phone Bluetooth-stack limitation rather than an app bug. The app retries up to five times; toggling Bluetooth off and on usually recovers the connection.
 
-**Workaround:** toggle Bluetooth off and on, then reconnect. The app retries up to five times before showing the error.
-
-### The fan slider is disabled
+**The fan slider is disabled**
 
 Manual fan control is disabled while automatic mode is active. Turn automatic mode off to use the slider or the presets.
+
+</details>
 
 ## Known limitations
 
@@ -218,7 +183,7 @@ Manual fan control is disabled while automatic mode is active. Turn automatic mo
 
 ## Disclaimer
 
-This is an unofficial community project. It is not affiliated with, endorsed by, or supported by Nubia, RedMagic, or ZTE. Bluetooth commands are sent directly to your hardware; use the app at your own risk.
+This project is not affiliated with, endorsed by, or supported by Nubia, RedMagic, or ZTE. Bluetooth commands are sent directly to your hardware; use the app at your own risk.
 
 Product images of the coolers bundled with the app are property of Nubia/RedMagic and are used only to identify compatible models. The app's logo and source code are original work.
 

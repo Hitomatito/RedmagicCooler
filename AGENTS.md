@@ -99,7 +99,8 @@ The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` →
 
 ## Documentation policy
 
-- The only durable docs are `README.md` (user-facing, English), this `AGENTS.md` (agent-facing), and `docs/branding/` (logo assets referenced by the README). There is no other documentation tree — do not create one.
+- The only durable docs are `README.md` (user-facing, English), this `AGENTS.md` (agent-facing), `docs/branding/` (logo), and `docs/screenshots/` (README screenshots: `auto-mode.png`, `fan-control.png`, `rgb-control.png`). There is no other documentation tree — do not create one.
+- README screenshots come from a real device over adb: `adb exec-out screencap -p > shot.png`, then process with ImageMagick — crop the status bar (`1080x2296+0+104`), resize to 540px wide (`magick shot.png -crop WxH+0+104 +repage -resize 540x -strip out.png`). Before capturing manual-fan screenshots, crop the "Información" card out of frame — it contains the real MAC address. Never commit shots with personal data (MACs, profile names that identify the owner).
 - Do not commit ad-hoc process documents (plans, review reports, execution checklists, scratch analysis). They served one repair cycle and were deleted in Nov 2026. When a durable decision or protocol fact is established, record it in the right `AGENTS.md` section in the same change.
 - Docs must state current, verified reality: no line-number anchors into code files (they rot — reference functions by name), exact test/build claims must be re-runnable, and superseded claims get corrected rather than annotated.
 
