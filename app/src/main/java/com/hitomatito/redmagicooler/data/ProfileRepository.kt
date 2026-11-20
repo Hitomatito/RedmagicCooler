@@ -169,6 +169,16 @@ class ProfileRepository(context: Context) {
         val profile = getProfile(profileId) ?: return
         updateProfile(profile.copy(isAutoMode = isAutoMode))
     }
+
+    /**
+     * Actualiza la preferencia de ruido (0 = rendimiento, 100 = silencio).
+     */
+    fun updateNoisePreference(profileId: String, preference: Int) {
+        val profile = getProfile(profileId) ?: return
+        val clamped = preference.coerceIn(0, 100)
+        if (profile.noisePreference == clamped) return
+        updateProfile(profile.copy(noisePreference = clamped))
+    }
     
     /**
      * Actualiza la configuración RGB de un perfil
@@ -240,6 +250,7 @@ class ProfileRepository(context: Context) {
             put("lastConnectedAt", profile.lastConnectedAt)
             put("fanSpeed", profile.fanSpeed)
             put("isAutoMode", profile.isAutoMode)
+            put("noisePreference", profile.noisePreference)
             
             profile.rgbConfig?.let { rgb ->
                 put("rgbEffectCode", rgb.effect.code.toInt())
@@ -277,6 +288,7 @@ class ProfileRepository(context: Context) {
                 lastConnectedAt = json.getLong("lastConnectedAt"),
                 fanSpeed = json.optInt("fanSpeed", 50),
                 isAutoMode = json.optBoolean("isAutoMode", false),
+                noisePreference = json.optInt("noisePreference", 50).coerceIn(0, 100),
                 rgbConfig = rgbConfig
             )
         } catch (e: Exception) {

@@ -22,13 +22,21 @@ object ThermalMonitorManager {
     @SuppressLint("StaticFieldLeak")
     private var monitor: ThermalMonitor? = null
 
+    @Volatile
+    private var noisePreference = 50
+
+    /** Preferencia de ruido del perfil activo (0 = rendimiento, 100 = silencio). */
+    fun setNoisePreference(value: Int) {
+        noisePreference = value.coerceIn(0, 100)
+    }
+
     /** Inicializa el monitor una sola vez en el proceso; seguro llamar varias veces. */
     fun initialize(context: Context) {
         if (monitor != null) return
 
         // El proceso propietario del estado térmico usa el contexto de aplicación.
         val appContext = context.applicationContext
-        val sharedMonitor = ThermalMonitor(appContext)
+        val sharedMonitor = ThermalMonitor(appContext) { noisePreference }
         monitor = sharedMonitor
         sharedMonitor.startMonitoring(monitorScope) { data ->
             _thermalData.value = data

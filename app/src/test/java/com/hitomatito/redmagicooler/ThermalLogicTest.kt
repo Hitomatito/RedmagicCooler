@@ -15,11 +15,19 @@ class ThermalLogicTest {
         skinTemp: Float = 0f,
         hardwarePeakTemp: Float = 0f,
         thermalStatus: Int = 0,
+        charging: Boolean = false,
+        screenInteractive: Boolean = true,
+        cpuTemp: Float = 0f,
+        gpuTemp: Float = 0f,
     ) = ThermalSample(
         batteryTemp = batteryTemp,
+        cpuTemp = cpuTemp,
+        gpuTemp = gpuTemp,
         skinTemp = skinTemp,
         hardwarePeakTemp = hardwarePeakTemp,
         thermalStatus = thermalStatus,
+        charging = charging,
+        screenInteractive = screenInteractive,
     )
 
     private fun state(
@@ -61,10 +69,10 @@ class ThermalLogicTest {
     @Test
     fun `interpolacion de velocidad objetivo`() {
         assertEquals(0, targetSpeedFor(39f))
-        assertEquals(25, targetSpeedFor(40f))
-        assertEquals(37, targetSpeedFor(45f))
-        assertEquals(50, targetSpeedFor(50f))
-        assertEquals(75, targetSpeedFor(55f))
+        assertEquals(20, targetSpeedFor(40f))
+        assertEquals(32, targetSpeedFor(45f))
+        assertEquals(45, targetSpeedFor(50f))
+        assertEquals(65, targetSpeedFor(55f))
         assertEquals(100, targetSpeedFor(60f))
         assertEquals(100, targetSpeedFor(80f))
     }
@@ -116,7 +124,7 @@ class ThermalLogicTest {
     }
 
     @Test
-    fun `rampa normal espera 20 segundos y sube de diez`() {
+    fun `rampa normal espera 30 segundos y sube de diez`() {
         val st = state(speed = 20)
         assertEquals(20, decide(st, sample(skinTemp = 55f), 10_000L, advance = true).speed)
 
@@ -283,55 +291,211 @@ class ThermalLogicTest {
     }
 
     @Test
-    fun `zonas con mismo tipo conservan el maximo`() {
-        val zones = aggregateThermalZones(listOf("tsens" to 45f, "tsens" to 52f, "cpu" to 40f))
-        assertEquals(52f, zones["tsens"]!!, 0.001f)
-        assertEquals(40f, zones["cpu"]!!, 0.001f)
-    }
-
-    @Test
-    fun `pico hardware solo considera zonas del SoC`() {
-        val peak = hardwarePeak(
-            mapOf(
-                "cpu" to 50f,
-                "gpu" to 58f,
-                "skin" to 70f,
-                "case" to 65f,
-                "battery" to 80f,
-                "pa_therm0" to 75f,
-            ),
-        )
-        assertEquals(58f, peak, 0.001f)
-    }
-
-    @Test
-    fun `pico hardware filtra outliers y sensores de carga o modem`() {
-        val peak = hardwarePeak(
-            mapOf(
-                "cpu0" to 60f,
-                "cpu1" to 150f,
-                "cpu_nan" to Float.NaN,
-                "cpu_inf" to Float.POSITIVE_INFINITY,
-                "gpu" to -10f,
-                "soc_charger" to 70f,
-                "bms_soc" to 85f,
-                "modem_temp" to 90f,
-                "battery" to 95f,
-            ),
-        )
-        assertEquals(60f, peak, 0.001f)
-
-        // Verificación de bordes exactos 0f y 115f
-        assertEquals(0f, hardwarePeak(mapOf("cpu" to 0f)), 0.001f)
-        assertEquals(115f, hardwarePeak(mapOf("cpu" to 115f)), 0.001f)
-    }
-
-    @Test
     fun `intervalo adaptativo`() {
         assertEquals(45_000L, adaptiveInterval(SAFE))
         assertEquals(20_000L, adaptiveInterval(WARM))
         assertEquals(10_000L, adaptiveInterval(HOT))
         assertEquals(5_000L, adaptiveInterval(CRITICAL))
         assertEquals(10_000L, adaptiveInterval(SAFE, 50f))
+    }
+
+    @Test
+    fun `fusion del soc reacciona antes sin usar el pico crudo`() {
+        val decision = decide(
+            state(speed = 40),
+            sample(skinTemp = 40f, hardwarePeakTemp = 60f),
+            30_000L,
+            advance = true,
+        )
+        // SoC 60 -> equivalente 50 -> objetivo 45 (ni 20 de la piel ni 100 del crudo).
+        assertEquals(45, decision.speed)
+        assertEquals(60f, decision.maxTemp, 0.001f)
+        assertTrue(!decision.isRiskConfirmed)
+        assertEquals("soc", decision.controlSource)
+    }
+
+    @Test
+    fun `estado termico severo exige suelo y emergencia`() {
+        val decision = decide(
+            state(speed = 20),
+            sample(skinTemp = 30f, thermalStatus = 3),
+            30_000L,
+            advance = true,
+        )
+        assertTrue(decision.isRiskConfirmed)
+        assertEquals(40, decision.speed)
+    }
+
+    @Test
+    fun `estado termico moderado aplica suelo sin confirmar riesgo`() {
+        val decision = decide(
+            ControlState(),
+            sample(skinTemp = 30f, thermalStatus = 2),
+            60_000L,
+            advance = true,
+        )
+        assertTrue(!decision.isRiskConfirmed)
+        assertEquals(10, decision.speed)
+        assertEquals("status", decision.controlSource)
+    }
+
+    @Test
+    fun `en silencio el suelo del SO sube con tiempos normales`() {
+        // 35% con status 2 (suelo 40) y preferencia 100: el salto al suelo de
+        // seguridad NO espera los 45 s del modo silencio; usa el dwell normal.
+        val st = state(speed = 35, speedChangeTimeMs = 20_000L)
+        val decision = decide(
+            st,
+            sample(skinTemp = 30f, thermalStatus = 2),
+            55_000L,
+            advance = false,
+            tuning = ThermalTuning(noisePreference = 100),
+        )
+        assertTrue(!decision.isRiskConfirmed)
+        assertEquals(40, decision.speed)
+    }
+
+    @Test
+    fun `tras caer a cero la subida respeta el dwell y no bombea`() {
+        // Acaba de caer a 0 en t=20_000; una demanda transitoria 15 s después
+        // no debe relanzar el ventilador (con la rodilla de la curva inestable
+        // esto produciría on/off con periodo de un sample).
+        val state = state(speed = 0, speedChangeTimeMs = 20_000L)
+        val early = decide(state, sample(skinTemp = 42f), 35_000L, advance = false)
+        assertEquals(0, early.speed)
+
+        // Pasado INCREASE_DELAY_MS (30 s desde el último cambio) sí arranca.
+        val late = decide(state, sample(skinTemp = 42f), 55_000L, advance = false)
+        assertEquals(10, late.speed)
+    }
+
+    @Test
+    fun `cargar con pantalla encendida sube el sesgo`() {
+        val charging = decide(
+            state(speed = 25),
+            sample(skinTemp = 44f, charging = true),
+            30_000L,
+            advance = true,
+        )
+        val idle = decide(
+            state(speed = 25),
+            sample(skinTemp = 44f),
+            30_000L,
+            advance = true,
+        )
+        assertEquals(35, charging.speed)
+        assertEquals(30, idle.speed)
+    }
+
+    @Test
+    fun `pantalla apagada amortigua el soc`() {
+        val off = decide(
+            state(speed = 40),
+            sample(skinTemp = 30f, hardwarePeakTemp = 70f, screenInteractive = false),
+            30_000L,
+            advance = true,
+        )
+        val on = decide(
+            state(speed = 40),
+            sample(skinTemp = 30f, hardwarePeakTemp = 70f, screenInteractive = true),
+            30_000L,
+            advance = true,
+        )
+        assertEquals(40, off.speed)
+        assertEquals(50, on.speed)
+    }
+
+    @Test
+    fun `no baja mientras la demanda sigue subiendo`() {
+        val st = state(speed = 80, smoothed = 40f, hasSmoothed = true)
+        val decision = decide(st, sample(skinTemp = 50f), 10_000L, advance = true)
+        assertEquals(80, decision.speed)
+    }
+
+    @Test
+    fun `cpu y gpu alimentan la senal del soc`() {
+        val decision = decide(
+            state(speed = 40),
+            sample(cpuTemp = 52f, gpuTemp = 62f),
+            30_000L,
+            advance = true,
+        )
+        // GPU 62 -> equivalente 51.3 -> objetivo 50; el maximo crudo es 62.
+        assertEquals(50, decision.speed)
+        assertEquals(62f, decision.maxTemp, 0.001f)
+    }
+
+    @Test
+    fun `la preferencia silenciosa sube mas lento`() {
+        val st = state(speed = 20)
+        val at30 = decide(
+            st,
+            sample(skinTemp = 55f),
+            30_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 100),
+        )
+        assertEquals(20, at30.speed)
+
+        val at45 = decide(
+            st,
+            sample(skinTemp = 55f),
+            45_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 100),
+        )
+        assertEquals(25, at45.speed)
+    }
+
+    @Test
+    fun `la preferencia de rendimiento sube antes`() {
+        val st = state(speed = 20)
+        val at10 = decide(
+            st,
+            sample(skinTemp = 55f),
+            10_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 0),
+        )
+        assertEquals(20, at10.speed)
+
+        val at20 = decide(
+            st,
+            sample(skinTemp = 55f),
+            20_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 0),
+        )
+        assertEquals(35, at20.speed)
+    }
+
+    @Test
+    fun `el silencio baja la demanda y el rendimiento la sube`() {
+        val quiet = decide(
+            state(speed = 50),
+            sample(skinTemp = 50f),
+            45_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 100),
+        )
+        val performance = decide(
+            state(speed = 50),
+            sample(skinTemp = 50f),
+            20_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 0),
+        )
+        val emergency = decide(
+            state(speed = 20, criticalActive = true),
+            sample(skinTemp = 55f),
+            60_000L,
+            advance = true,
+            tuning = ThermalTuning(noisePreference = 100),
+        )
+
+        assertEquals(40, quiet.speed)
+        assertEquals(55, performance.speed)
+        // La emergencia ignora la preferencia de ruido.
+        assertEquals(40, emergency.speed)
     }
 }

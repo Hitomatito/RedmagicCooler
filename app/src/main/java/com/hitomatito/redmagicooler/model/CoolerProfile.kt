@@ -18,6 +18,8 @@ data class CoolerProfile(
     // Configuración de velocidad del ventilador
     val fanSpeed: Int = 50,
     val isAutoMode: Boolean = false,
+    // 0 = máximo rendimiento, 100 = máximo silencio; solo aplica en modo automático.
+    val noisePreference: Int = 50,
     
     // Configuración RGB
     val rgbConfig: RGBConfig? = null,
