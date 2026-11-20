@@ -249,6 +249,17 @@ internal fun adaptiveInterval(
 private fun quantizeSpeed(speed: Int): Int =
     (speed.coerceIn(0, 100) / SPEED_QUANTUM) * SPEED_QUANTUM
 
+/**
+ * Gate de comandos del modo automatico: el servicio escribe al cooler solo cuando el
+ * objetivo del controlador difiere a la vez de la velocidad reportada por el eco
+ * ([current]) y de la ultima realmente comandada ([lastCommanded]). Durante el arranque
+ * del ventilador el eco reporta RPM transitorios y el guard evita reescrituras por
+ * sample; tras una desconexion [lastCommanded] se reinicia a -1, de modo que el
+ * reconectado rearma siempre la velocidad fisica del aparato.
+ */
+internal fun shouldWriteToCooler(recommended: Int, current: Int, lastCommanded: Int): Boolean =
+    recommended != current && recommended != lastCommanded
+
 private data class CriticalState(
     val active: Boolean,
     val sinceMs: Long,

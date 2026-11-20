@@ -280,8 +280,9 @@ class MainActivity : ComponentActivity() {
             requestStartupPermissions()
         }
         
-        // El monitor térmico lo inicializa CoolerService solo cuando el modo
-        // automático está activo; la UI no mantiene sensores encendidos.
+        // El monitor térmico es propiedad del proceso: lo inicializa CoolerService en
+        // su onCreate y no se apaga al terminar el modo auto, porque la UI consume su
+        // StateFlow para el tile de temperatura. La UI no crea un segundo productor.
 
         // Motor BLE: propietario único de la conexión (compartido con CoolerService)
         CoolerBleManager.init(this)

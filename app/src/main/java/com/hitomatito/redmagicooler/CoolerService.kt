@@ -74,9 +74,17 @@ class CoolerService : Service() {
     // El servicio actúa como cliente: observa eventos y emite comandos.
     private val isConnected: Boolean
         get() = CoolerBleManager.state.value == CoolerBleManager.ConnectionState.CONNECTED
-    private var lastAutoAdjustTime = 0L
-    private var currentTemp = 0f
-    private var currentSpeed = 0
+    @Volatile private var currentTemp = 0f
+    // currentSpeed/lastCommandedSpeed se escriben desde el colector de eventos BLE y
+    // se leen/escriben desde el colector térmico (Dispatchers.Default, multi-hilo):
+    // @Volatile por el mismo criterio que los flags del watchdog del motor BLE.
+    @Volatile private var currentSpeed = 0
+    // Ultima velocidad realmente comandada al cooler. El eco FanSpeedChanged puede
+    // pisar currentSpeed con el RPM del arranque; comparar solo contra el eco
+    // provocaria reescrituras en cada sample mientras el ventilador estabiliza.
+    // Se invalida (-1) en cada desconexion/conexión para que el reconectado del motor
+    // rearme el cooler tras un ciclo de energia del aparato.
+    @Volatile private var lastCommandedSpeed = -1
     private var lastNotificationTime = 0L
     private var lastNotifiedSpeed = -1
     private var lastNotifiedTemp = -1f
@@ -133,6 +141,9 @@ class CoolerService : Service() {
                 when (event) {
                     is CoolerBleManager.BleEvent.Connected -> {
                         logDebug("Cooler conectado: ${event.device.deviceType.deviceName}")
+                        // Rearmar el guard de comandos: tras el reconectado el cooler puede
+                        // estar en una velocidad fisica distinta de la ultima comandada.
+                        lastCommandedSpeed = -1
                         activeProfile?.let { p ->
                             ProfileRepository.getInstance(this@CoolerService).updateConnectionState(p.id, true)
                         }
@@ -144,6 +155,7 @@ class CoolerService : Service() {
                     }
                     is CoolerBleManager.BleEvent.Disconnected -> {
                         logDebug("Cooler desconectado (status=${event.status})")
+                        lastCommandedSpeed = -1
                         // Solo reflejar la desconexión: el modo auto NO se desactiva aquí
                         // (el motor BLE reintenta solo); el modo se cambia vía ACTION_SWITCH_TO_MANUAL.
                         activeProfile?.let { p ->
@@ -315,8 +327,16 @@ class CoolerService : Service() {
                 // Conectar directamente usando la MAC del dispositivo ya conectado
                 val deviceMac = intent.getStringExtra("DEVICE_MAC")
                 if (deviceMac != null) {
-                    logDebug("Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
-                    activeProfile?.let { p -> CoolerBleManager.connectByMac(deviceMac, p.deviceType) }
+                    // Mismo guard que ACTION_START_AUTO: si el motor ya está conectado
+                    // o conectando a esta MAC, connectByMac cerraría el GATT en vuelo.
+                    val yaConectado = CoolerBleManager.isHealthy() &&
+                        CoolerBleManager.currentConnectedAddress()?.equals(deviceMac, ignoreCase = true) == true
+                    if (yaConectado || CoolerBleManager.isBusyWith(deviceMac)) {
+                        logDebug("Enlace existente con $deviceMac: se reutiliza sin reconectar")
+                    } else {
+                        logDebug("Conectando directamente a dispositivo: $deviceMac (sin escaneo)")
+                        activeProfile?.let { p -> CoolerBleManager.connectByMac(deviceMac, p.deviceType) }
+                    }
                 } else {
                     Log.e(TAG, "No se recibio MAC del dispositivo")
                 }
@@ -709,24 +729,18 @@ class CoolerService : Service() {
             thermalTelemetry.logSample(data, currentSpeed)
 
             if (CoolerBleManager.isHealthy()) {
-                val currentTime = System.currentTimeMillis()
+                val recommendedSpeed = data.recommendedSpeed
                 
-                // Ajustar más frecuentemente para mejor respuesta del sistema progresivo
-                // Intervalo reducido a 10 segundos (desde 15s) para mejor progresión
-                if (currentTime - lastAutoAdjustTime > 10000) {
-                    val recommendedSpeed = data.recommendedSpeed
+                // ThermalLogic temporiza sus propias rampas (upDelay/downDelay según la
+                // preferencia de ruido); el servicio manda solo cuando el objetivo del
+                // controlador difiere a la vez de la velocidad actual y de la última comandada.
+                if (shouldWriteToCooler(recommendedSpeed, currentSpeed, lastCommandedSpeed)) {
+                    setFanSpeed(recommendedSpeed)
                     
-                    // Solo aplicar el cambio si la velocidad recomendada es diferente
-                    // Esto permite que el sistema progresivo controle el ritmo de incremento
-                    if (recommendedSpeed != currentSpeed) {
-                        setFanSpeed(recommendedSpeed)
-                        lastAutoAdjustTime = currentTime
-                        
-                        // Log informativo para temperaturas elevadas
-                        if (data.tempLevel == ThermalMonitor.TempLevel.HOT || 
-                            data.tempLevel == ThermalMonitor.TempLevel.CRITICAL) {
-                            logDebug("Ajuste automático: ${data.maxTemp}°C → $recommendedSpeed%")
-                        }
+                    // Log informativo para temperaturas elevadas
+                    if (data.tempLevel == ThermalMonitor.TempLevel.HOT || 
+                        data.tempLevel == ThermalMonitor.TempLevel.CRITICAL) {
+                        logDebug("Ajuste automático: ${data.maxTemp}°C → $recommendedSpeed%")
                     }
                 }
                 
@@ -752,13 +766,15 @@ class CoolerService : Service() {
             logDebug("Saltando ajuste de velocidad: no conectado")
             return
         }
-        val rawValue = CoolerBleConstants.percentageToRaw(speed.coerceIn(0, 100))
+        val clamped = speed.coerceIn(0, 100)
+        val rawValue = CoolerBleConstants.percentageToRaw(clamped)
         val previousSpeed = currentSpeed
-        currentSpeed = speed
-        logDebug("Ajustando velocidad automáticamente: $speed% (raw: $rawValue)")
+        currentSpeed = clamped
+        lastCommandedSpeed = clamped
+        logDebug("Ajustando velocidad automáticamente: $clamped% (raw: $rawValue)")
         
         // Actualizar notificación inmediatamente al cambiar velocidad
-        if (previousSpeed != speed) {
+        if (previousSpeed != clamped) {
             val tempStatus = when {
                 currentTemp >= ThermalMonitor.TEMP_CRITICAL -> "Critico"
                 currentTemp >= ThermalMonitor.TEMP_HOT -> "Caliente"

@@ -278,14 +278,32 @@ class ThermalMonitor(
 
     /** Inicializa la caché de zonas térmicas válidas (una sola vez). */
     private fun initThermalCache() {
-        for (i in 0..30) {
-            val tempFile = File("/sys/class/thermal/thermal_zone$i/temp")
-            val typeFile = File("/sys/class/thermal/thermal_zone$i/type")
+        // Se enumeran las zonas del directorio en lugar de sondear un rango fijo:
+        // algunos SoC exponen más de 30 zonas y el rango las descartaba.
+        val thermalRoot = File("/sys/class/thermal")
+        val zoneName = Regex("thermal_zone(\\d+)")
+        val listed = thermalRoot.listFiles()
+        var candidates: List<Pair<Int, File>> = listed
+            ?.mapNotNull { entry ->
+                zoneName.matchEntire(entry.name)?.groupValues?.get(1)?.toIntOrNull()?.let { it to entry }
+            }
+            ?.sortedBy { (index, _) -> index }
+            ?: emptyList()
+        if (candidates.isEmpty()) {
+            // SELinux puede negar el listado del directorio raiz permitiendo el acceso
+            // a las zonas, y algunos kernels exoticos devuelven el listado vacio: en
+            // ambos casos se sondea un rango amplio en lugar de quedarse sin zonas.
+            Log.w(TAG, "Listado de /sys/class/thermal vacio o denegado; tanteando zonas 0..63")
+            candidates = (0..63).map { it to File(thermalRoot, "thermal_zone$it") }
+        }
+        for ((index, zoneDir) in candidates) {
+            val tempFile = File(zoneDir, "temp")
+            val typeFile = File(zoneDir, "type")
             try {
                 if (tempFile.exists() && tempFile.canRead() && typeFile.exists() && typeFile.canRead()) {
                     val type = typeFile.readText().trim().lowercase()
                     if (type.isNotEmpty()) {
-                        thermalZoneCache[i] = ThermalZoneEntry(tempFile, type)
+                        thermalZoneCache[index] = ThermalZoneEntry(tempFile, type)
                     }
                 }
             } catch (_: Exception) {

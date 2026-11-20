@@ -5,6 +5,7 @@ import com.hitomatito.redmagicooler.ThermalMonitor.TempLevel.HOT
 import com.hitomatito.redmagicooler.ThermalMonitor.TempLevel.SAFE
 import com.hitomatito.redmagicooler.ThermalMonitor.TempLevel.WARM
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -497,5 +498,19 @@ class ThermalLogicTest {
         assertEquals(55, performance.speed)
         // La emergencia ignora la preferencia de ruido.
         assertEquals(40, emergency.speed)
+    }
+
+    @Test
+    fun `el gate de escritura suprime el eco pero rearma tras desconexion`() {
+        // Objetivo 40, eco reportando 45 (RPM transitorio del arranque), ultima
+        // comandada 40: no se reescribe mientras el ventilador estabiliza.
+        assertFalse(shouldWriteToCooler(recommended = 40, current = 45, lastCommanded = 40))
+        // Objetivo igual a la velocidad actual: tampoco hace falta escribir.
+        assertFalse(shouldWriteToCooler(recommended = 40, current = 40, lastCommanded = 40))
+        // Objetivo nuevo del controlador: manda el comando.
+        assertTrue(shouldWriteToCooler(recommended = 50, current = 40, lastCommanded = 40))
+        // Tras el reconectado lastCommanded vuelve a -1: el cooler queda re-arma
+        // aunque el eco ya informe la velocidad recomendada.
+        assertTrue(shouldWriteToCooler(recommended = 50, current = 0, lastCommanded = -1))
     }
 }
