@@ -77,6 +77,12 @@ Requirements:
 | Android Build Tools | 36.0.0 |
 | Gradle | 9.9.1 (wrapper) |
 
+If `java` is not on your `PATH`, `./gradlew` fails with `JAVA_HOME is not set`. Export a JDK 21 first, for example:
+
+```bash
+export JAVA_HOME=/path/to/jdk-21
+```
+
 ```bash
 git clone https://github.com/Hitomatito/RedmagicCooler.git
 cd RedmagicCooler

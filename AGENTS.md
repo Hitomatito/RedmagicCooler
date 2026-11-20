@@ -41,7 +41,7 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 | BLE engine, single GATT owner | `ble/CoolerBleManager.kt` |
 | Centralized runtime permissions | `BlePermissionManager.kt` |
 | Compose UI + navigation | `MainActivity.kt`, `ui/` |
-| Auto-mode foreground service (client of BLE engine) | `CoolerService.kt` |
+| Auto-mode foreground service (client of BLE engine) | `CoolerService.kt` (FGS via `ServiceCompat.startForeground` with `FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE`; deferred manual→auto stops pass the intent's `startId` to `stopSelf(startId)` — do not add a mutable `currentStartId` field) |
 | Thermal sensing + shared process-wide thermal state | `ThermalMonitor.kt` (Android wrapper: role-based zone reads, sensors, loop, lock), `ThermalLogic.kt` (pure Kotlin: weighted fusion of comfort skin/battery, SoC CPU/GPU rescaled, Android thermal status 0-6, charging/screen context, noise-preference curve tuning, EMA/trend, ramp/hysteresis — no Android/clock), `ThermalMonitorManager.kt` (singleton; `CoolerService` initializes it only while auto mode runs — the UI does not keep sensors active; the active profile's `noisePreference` 0=rendimiento/100=silencio flows to `ThermalLogic` via `setNoisePreference`) |
 | Per-model thermal zones + debug telemetry | `ThermalZoneMapping.kt` (pure `ThermalZoneRole` classifier/aggregation, defaults for `xiaomi|2107113sg|vili`), `data/ThermalZoneProfileRepository.kt` (load-only per-model overrides from prefs `thermal_zone_profiles` — written by hand for debugging, no UI/save API), `data/ThermalTelemetry.kt` (JSONL in `filesDir/thermal/`, debug-only, 1 MiB rotation) |
 | Profile persistence (SharedPreferences + JSON, `StateFlow`) | `data/ProfileRepository.kt` (singleton; manual per-field `profileToJson`/`jsonToProfile` — new `CoolerProfile` fields must be added in **both** or they are silently lost across save/load) |
@@ -57,6 +57,16 @@ Package root `com.hitomatito.redmagicooler`. `:app` is the only module.
 Automatic mode state is coordinated through `CoolerService` intents (`ACTION_START_AUTO`, `ACTION_STOP_AUTO`, `ACTION_SWITCH_TO_MANUAL`, `ACTION_SET_DEVICE_TYPE`, `ACTION_USE_CONNECTED_DEVICE`) and the selected profile in `ProfileRepository`. There is no static service handle (`getInstance()`/`instance` were removed as dead code): MainActivity drives RGB straight through `CoolerBleManager` even in auto mode. No separate persisted active-profile id is kept (the legacy `active_profile` key is actively removed on startup). Manual-mode UI stays available while disconnected, but is disabled when the profile’s auto mode is on.
 
 A duplicated profile is created with a **blank `macAddress`** and binds to the real MAC on first connect (`ProfileRepository.updateMacAddress`); auto mode is refused until then (`MainActivity` shows a toast). `AppPreferences.isOnboardingDone` gates the permission-onboarding route at startup.
+
+## Reviewed-and-rejected decisions (do not reintroduce)
+
+These proposals came from the 2026 critical-logic refactor review. The process documents that recorded them (`docs/*_report.md`, `docs/plan_refactorizacion_logica_critica.md`, `egm_lite_checklist.md`) were deleted after the repair cycle — this section is now the only source of truth:
+
+- **EMA 40 °C seeding in `ThermalLogic`**: dampens the first reading of an already-hot phone (65 °C → ~48 °C), suppressing the fan exactly when it is needed most, and breaks the unbiased first-reading assertions in `ThermalLogicTest`. Keep `if (initialized) ema(...) else raw`.
+- **`RECEIVER_NOT_EXPORTED` on the sticky-battery `registerReceiver(null, …)` in `getCurrentBatteryLevel()`**: a null receiver on a protected sticky broadcast registers nothing and can throw `SecurityException` on some Android 13/14 builds. Leave the call unchanged (future alternative: `BatteryManager.getIntProperty(BATTERY_PROPERTY_CAPACITY)`).
+- **Wrapping `readCurrentFanSpeed()` in `withTimeoutOrNull`**: adds competing cancel timers; it already retries internally 20 × 100 ms.
+- **`CoolerBleManager` `BleState` sealed interface / removal of the `@Volatile` watchdog flags**: conflates external UI state with Binder-thread synchronization latches required by the firmware `status == 22` recovery path. Keep `StateFlow<ConnectionState>` and the volatile flags.
+- **GATT read injection after a write timeout**: a write timeout means a degraded link; injecting reads starves the op queue and can block clean disconnects/watchdog recovery.
 
 ## BLE protocol facts (reverse-engineered, no public spec)
 
@@ -85,6 +95,20 @@ The live mapping is `CoolerBleConstants.percentageToRaw` / `rawToPercentage` →
 - Commit messages are Conventional Commits, usually **Spanish** subjects: `feat(ui): ...`, `fix(ble): ...`, `chore: subir versión a 1.4.0`, `docs: ...`. Branches are usually `origin/<issue-number>-<spanish-description>`; PRs target `main`.
 - `settings.gradle.kts` has `rootProject.name = "RedmagiCooler"` (missing "c") while the application id, package and app label are `RedmagicCooler` / `redmagicooler`. Don’t rename casually — it changes the Gradle module name.
 - `CoolerService.DEBUG` follows `BuildConfig.DEBUG` (verbose in debug, off in release); R8 also strips `Log.d`/`Log.i` in release via `app/proguard-rules.pro`. No manual flip needed.
+- **No emojis anywhere** — code, comments, KDoc, log/UI strings, markdown, commit messages. Typographic characters (`→`, `°C`, `—`) are fine. Professional, dry prose is the house style.
+
+## Documentation policy
+
+- The only durable docs are `README.md` (user-facing, English), this `AGENTS.md` (agent-facing), and `docs/branding/` (logo assets referenced by the README). There is no other documentation tree — do not create one.
+- Do not commit ad-hoc process documents (plans, review reports, execution checklists, scratch analysis). They served one repair cycle and were deleted in Nov 2026. When a durable decision or protocol fact is established, record it in the right `AGENTS.md` section in the same change.
+- Docs must state current, verified reality: no line-number anchors into code files (they rot — reference functions by name), exact test/build claims must be re-runnable, and superseded claims get corrected rather than annotated.
+
+## Rules for changes
+
+- Before committing any code change: `./gradlew testDebugUnitTest` and `./gradlew assembleDebug` must pass (export `JAVA_HOME` first; `--offline` works once dependencies are cached).
+- New behavior that is testable goes in pure Kotlin files (like `ThermalLogic.kt` / `ThermalZoneMapping.kt`) with JVM unit tests in `app/src/test/`. Do not add test dependencies (MockK, Robolectric, Turbine) to `gradle/libs.versions.toml` without being asked.
+- BLE protocol constants (UUIDs, byte layouts, raw ranges, thermal curves) change only with real-hardware captures or official-app decompilation evidence — cite that evidence in the commit message.
+- Version bumps (`versionCode`/`versionName` in `app/build.gradle.kts`) are separate commits (`chore: subir versión a X.Y.Z`), never folded into a feature commit.
 
 ## Testing reality
 
